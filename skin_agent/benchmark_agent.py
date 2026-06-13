@@ -28,7 +28,7 @@ from langgraph.prebuilt import ToolNode
 
 import time
 
-from .tools import MAKETool, PanDermTool, DermoGPTTool, RAGTool, TextRAGTool, OntologyTool, preload_tools_sequential, tool_timing_registry, ToolMemoryManager
+from .tools import MAKETool, PanDermTool, DermoGPTTool, Qwen3VLTool, RAGTool, TextRAGTool, OntologyTool, preload_tools_sequential, tool_timing_registry, ToolMemoryManager
 from .tracing import AgentTrace, TraceLogger, ToolCall, AgentStep, CriticRetryStep
 from .utils.retry import with_rate_limit_retry
 from .utils.image_utils import generate_image_id, register_image_path
@@ -1565,6 +1565,7 @@ def create_tools(
     use_flash_attn: bool = False,
     preload: bool = True,
     qdrant_path: str = "./qdrant_storage",
+    qwen_model_id: str = "Qwen/Qwen3-VL-8B-Instruct",
 ) -> List:
     """
     Create and initialize dermatology tools.
@@ -1606,7 +1607,16 @@ def create_tools(
         print(f"[Tool Creation] Creating DermoGPTTool (flash_attn={use_flash_attn})...")
         dermogpt_tool = DermoGPTTool(device=device, use_flash_attn=use_flash_attn)
         tools.append(dermogpt_tool)
-    
+
+    # REPRO PATCH: wire Qwen3-VL as an agent tool. The Qwen3VLTool class shipped
+    # in skin_tools.py (name="qwen_vqa") but create_tools() had no branch to
+    # instantiate it (and the runners passed an unsupported qwen_model_id kwarg).
+    # This closes the paper-vs-code gap so the agent can use Qwen3-VL as its
+    # general VLM alongside DermoGPT.
+    if "qwen_vqa" in enabled_tools:
+        print(f"[Tool Creation] Creating Qwen3VLTool (model={qwen_model_id}, flash_attn={use_flash_attn})...")
+        tools.append(Qwen3VLTool(device=device, model_id=qwen_model_id, use_flash_attn=use_flash_attn))
+
     if "rag" in enabled_tools:
         print("[Tool Creation] Creating RAGTool (multimodal: image + text)...")
         rag_tool = RAGTool(device=device)

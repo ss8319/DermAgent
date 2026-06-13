@@ -56,7 +56,7 @@ class Summary_Module:
         ]
 
         completion = self.client.chat.completions.create(
-            model="chatgpt-4o-latest",
+            model="gpt-4o",
             messages=messages
         )
         summary_text = completion.choices[0].message.content

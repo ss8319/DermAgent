@@ -62,7 +62,7 @@ class GPT_Decider:
         ]
 
         completion = self.client.chat.completions.create(
-            model="chatgpt-4o-latest",
+            model="gpt-4o",
             messages=messages
         )
         result = completion.choices[0].message.content
