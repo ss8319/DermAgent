@@ -71,15 +71,23 @@ def load_dermlip_model():
 
 def build_qdrant_index():
     print(f"Running on device: {DEVICE}")
-    print("Initializing Qdrant client at localhost:6333...")
-    client = QdrantClient(host="localhost", port=6333)
+    # REPRO PATCH: prefer embedded on-disk Qdrant via QDRANT_PATH (no server
+    # needed on the cluster); RAGTool reads the 'derm1m' collection from the same
+    # path. Falls back to the localhost server only if QDRANT_PATH is set to "".
+    _qpath = os.environ.get("QDRANT_PATH", "./qdrant_storage")
+    if _qpath:
+        print(f"Using embedded Qdrant at {_qpath} ...")
+        client = QdrantClient(path=_qpath)
+    else:
+        print("Initializing Qdrant client at localhost:6333...")
+        client = QdrantClient(host="localhost", port=6333)
 
     print(f"Loading data from {CSV_PATH}...")
     if not os.path.exists(CSV_PATH):
         print(f"Error: CSV file not found at {CSV_PATH}")
         sys.exit(1)
 
-    df = pd.read_csv(CSV_PATH)
+    df = pd.read_csv(CSV_PATH, encoding="utf-8-sig")  # REPRO PATCH: strip UTF-8 BOM on 'filename' header
 
     # Filter out VQA images
     initial_count = len(df)
@@ -147,7 +155,13 @@ def build_qdrant_index():
 
         try:
             # 1. Image Embeddings
-            imgs = [preprocess(Image.open(p).convert("RGB")) for p in image_paths]
+            # REPRO PERF PATCH: decode+preprocess in parallel threads (PIL releases
+            # the GIL during C decode) — ~5-10x faster over 413K images, turning a
+            # multi-hour decode into ~1h. Order-preserving (ex.map keeps order).
+            from concurrent.futures import ThreadPoolExecutor
+            _nw = int(os.environ.get("DECODE_WORKERS", "16"))
+            with ThreadPoolExecutor(max_workers=_nw) as _ex:
+                imgs = list(_ex.map(lambda p: preprocess(Image.open(p).convert("RGB")), image_paths))
             img_tensor = torch.stack(imgs).to(DEVICE)
             with torch.no_grad():
                 image_features = model.encode_image(img_tensor)
