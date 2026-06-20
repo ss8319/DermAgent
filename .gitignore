@@ -89,3 +89,6 @@ baselines/MedAgent-Pro/Dermatology/*/plan.json
 baselines/MedAgent-Pro/Dermatology/*/tools/
 baselines/MedAgent-Pro/Dermatology/*/__init__.py
 baselines/MedAgent-Pro/Dermatology/*/toolset.json.orig
+
+# guideline-RAG source chunks (local only, not redistributed)
+RAG/

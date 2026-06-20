@@ -1694,9 +1694,18 @@ class TextRAGTool(BaseSkinTool):
             from qdrant_client import QdrantClient
             from transformers import AutoModel, AutoTokenizer, AutoModelForCausalLM
 
-            # Connect to Qdrant server
-            print(f"[TextRAGTool] Connecting to Qdrant at {self.qdrant_host}:{self.qdrant_port}...")
-            self.client = QdrantClient(host=self.qdrant_host, port=self.qdrant_port, timeout=120)
+            # Connect to Qdrant. REPRO PATCH: prefer embedded on-disk mode via
+            # QDRANT_PATH (mirrors RAGTool + build_qdrant_rag.py) so no server is
+            # needed. NOTE: a path-mode client locks the dir, so do not open the
+            # same QDRANT_PATH from RAGTool and TextRAGTool in one process.
+            import os as _os
+            _qpath = _os.environ.get("QDRANT_PATH", "./qdrant_storage")
+            if _qpath:
+                print(f"[TextRAGTool] Using embedded Qdrant at {_qpath} ...")
+                self.client = QdrantClient(path=_qpath)
+            else:
+                print(f"[TextRAGTool] Connecting to Qdrant at {self.qdrant_host}:{self.qdrant_port}...")
+                self.client = QdrantClient(host=self.qdrant_host, port=self.qdrant_port, timeout=120)
 
             # Verify collection exists
             collections = self.client.get_collections().collections
