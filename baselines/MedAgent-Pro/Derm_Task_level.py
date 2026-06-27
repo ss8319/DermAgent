@@ -64,10 +64,9 @@ TASK_CONFIGS = {
             "dots/globules, streaks, blue-white veil, regression structures, vascular patterns.\n"
             "- Use zero-shot classification (tool 2) for initial differential diagnosis.\n"
             "- Use concept annotation (tool 3) to extract evidence-based dermoscopic features.\n"
-            "- Use VLM (tool 1) for qualitative assessment of prior evidence.\n"
-            "- End with ONE final qualitative VLM step whose 'action' is the single "
-            "phrase 'classify the skin lesion'. Do NOT use the words 'and'/'integrate', "
-            "commas, or slashes in ANY 'action' string (the validator rejects them).\n"
+            "- Use VLM (tool 1) for qualitative assessment integrating ALL prior evidence.\n"
+            "- The final qualitative step should determine the most likely diagnosis "
+            "from the candidate list.\n"
         ),
     },
     2: {
