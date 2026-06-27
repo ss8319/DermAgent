@@ -79,6 +79,13 @@ def main():
     ap.add_argument("--base-url", default=os.getenv("OPENAI_BASE_URL"))
     ap.add_argument("--enabled-tools", default="panderm,make,rag,ontology")
     ap.add_argument("--device", default="cuda")
+    ap.add_argument("--enable-lru", action="store_true",
+                    help="LRU GPU memory mgmt: load/evict tools on demand so the full 7-tool stack fits a smaller GPU")
+    ap.add_argument("--max-loaded-models", type=int, default=2)
+    ap.add_argument("--max-tool-calls", type=int, default=20,
+                    help="Tool-call budget (default 20; the 7-tool stack needs more than the agent's default 10)")
+    ap.add_argument("--recursion-limit", type=int, default=60,
+                    help="LangGraph recursion limit (default 60; each tool round = 2 graph steps)")
     ap.add_argument("--limit", type=int, default=None)
     args = ap.parse_args()
 
@@ -100,13 +107,19 @@ def main():
           f"| backbone={args.backbone} base_url={args.base_url} tools={args.enabled_tools}")
 
     enabled = [t.strip() for t in args.enabled_tools.split(",") if t.strip()]
-    tools = create_tools(device=args.device, enabled_tools=enabled)
+    # With LRU enabled, don't preload all tools (would OOM); load/evict on demand.
+    tools = create_tools(device=args.device, enabled_tools=enabled, preload=not args.enable_lru)
     agent = create_benchmark_agent(tools=tools, model_name=args.backbone,
                                    device=args.device, base_url=args.base_url,
-                                   enabled_tools=enabled)
+                                   enabled_tools=enabled,
+                                   memory_management=args.enable_lru,
+                                   max_loaded_models=args.max_loaded_models,
+                                   max_tool_calls=args.max_tool_calls,
+                                   recursion_limit=args.recursion_limit)
     runner = BenchmarkRunner(agent=agent, tools=tools,
                              trace_logger=TraceLogger(log_dir=str(args.output.parent / "traces")),
-                             model_name=args.backbone)
+                             model_name=args.backbone,
+                             recursion_limit=args.recursion_limit)
 
     with args.output.open("a") as fout:
         for i, row in enumerate(todo, 1):

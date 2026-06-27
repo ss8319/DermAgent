@@ -908,8 +908,9 @@ Notes:
 - Pass the image id (given in the user message) as image_path when calling an image tool.
 - Use tools to CORROBORATE; the final differential is YOUR synthesis of the case + image(s) + any tool evidence.
 - Do not restrict yourself to any list, and do not invent diseases not supported by the case.
+- BE EFFICIENT: the tools are deterministic, so calling the same tool on the same image again gives the same result — call each tool AT MOST once or twice. As soon as you have enough evidence, STOP calling tools and write your FINAL_ANSWER. Do not keep gathering evidence indefinitely.
 
-When finished, end your message with exactly this block:
+When you are done gathering evidence, write a brief synthesis and end your message with exactly this block:
 FINAL_ANSWER:
 1. <most likely diagnosis>
 2. <second>
