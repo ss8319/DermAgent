@@ -892,10 +892,37 @@ ABLATION_PROMPTS_BY_TASK = {
 # Task Configuration
 # =============================================================================
 
+OPEN_SET_DX_SYSTEM_PROMPT = """You are DermAgent, an expert clinical reasoner producing an OPEN-SET differential diagnosis from a multimodal patient case (a clinical narrative plus one or more images, which may be of different kinds).
+
+Goal: integrate the case text and the image(s) and output a ranked TOP-5 differential diagnosis, most likely first. The answer is FREE TEXT — there is NO fixed list of options. Name the actual most-likely diseases.
+
+You MAY call specialist tools to gather evidence. You decide entirely whether, when, and on which image to use each one — look at each attached image and judge for yourself:
+- panderm_classifier: zero-shot skin-disease classifier. It needs a candidate list, so YOU propose candidate diagnoses (comma-separated) and it ranks them on the image id you choose.
+- make_concept_annotator: extracts dermatological visual concepts from an image.
+- dermogpt_vqa / qwen_vqa: visual question answering about an image.
+- rag_retrieval: retrieves visually-similar diagnosed cases (pass image_path only); their diagnoses are candidate evidence.
+- text_rag_retrieval: retrieves clinical-guideline text (pass a query).
+- ontology_query: disease-hierarchy / taxonomy lookup.
+
+Notes:
+- Pass the image id (given in the user message) as image_path when calling an image tool.
+- Use tools to CORROBORATE; the final differential is YOUR synthesis of the case + image(s) + any tool evidence.
+- Do not restrict yourself to any list, and do not invent diseases not supported by the case.
+
+When finished, end your message with exactly this block:
+FINAL_ANSWER:
+1. <most likely diagnosis>
+2. <second>
+3. <third>
+4. <fourth>
+5. <fifth>"""
+
+
 TASK_PROMPTS = {
     "diagnosis": DIAGNOSIS_SYSTEM_PROMPT,
     "concept": CONCEPT_SYSTEM_PROMPT,
     "captioning": CAPTIONING_SYSTEM_PROMPT,
+    "open_diagnosis": OPEN_SET_DX_SYSTEM_PROMPT,
 }
 
 # DATASET_CONFIGS is imported from .configs to avoid circular imports
@@ -3095,6 +3122,84 @@ End with FINAL_ANSWER: [your complete caption]"""
             "trace": trace,
         }
     
+    def run_open_diagnosis(
+        self,
+        case_text: str,
+        image_paths: List[str],
+        instruction: str,
+        case_id: str = "",
+    ) -> Dict[str, Any]:
+        """Open-set, multi-image mode (for DermArena-style cases).
+
+        Attaches ALL images to the multimodal backbone, offers the full tool set,
+        and lets the LLM autonomously decide which tools to call on which image.
+        Returns the agent's free-text response (expected to end with a top-5
+        FINAL_ANSWER block). No closed-set options, no answer parsing.
+        """
+        import base64
+        from pathlib import Path
+
+        media_types = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
+                       ".gif": "image/gif", ".webp": "image/webp", ".bmp": "image/bmp"}
+        content = []
+        id_lines = []
+        for i, p in enumerate(image_paths or [], 1):
+            if not p or not Path(p).exists():
+                continue
+            with open(p, "rb") as f:
+                b64 = base64.b64encode(f.read()).decode("utf-8")
+            mt = media_types.get(Path(p).suffix.lower(), "image/jpeg")
+            img_id = generate_image_id(p)
+            register_image_path(img_id, p)
+            content.append({"type": "image_url", "image_url": {"url": f"data:{mt};base64,{b64}"}})
+            id_lines.append(f"  image {i}: id={img_id}")
+        n_attached = len(id_lines)
+
+        img_block = ("Attached images (pass the id as image_path when calling an image tool):\n"
+                     + "\n".join(id_lines)) if id_lines else "(no images available for this case)"
+        user_message = f"{instruction}\n\n{img_block}\n\n## Case\n{case_text}"
+        content.append({"type": "text", "text": user_message})
+        messages = [HumanMessage(content=content if n_attached else user_message)]
+
+        input_state = {
+            "messages": messages,
+            "current_image": (image_paths[0] if image_paths else None),
+            "task_type": "open_diagnosis",
+            "dataset": None,
+            "options": None,
+            "tool_call_count": 0,
+            "critic_retry_count": 0,
+            "tools_called": [],
+            "last_critic_feedback": None,
+            "evidence_summaries": [],
+            "image_reinject_count": 0,
+            "tool_call_cache": {},
+            "text_rag_queries": [],
+        }
+        config = {
+            "configurable": {"thread_id": f"open_{case_id or abs(hash(str(image_paths)))}"},
+            "recursion_limit": self.recursion_limit,
+            "tags": ["open_diagnosis", self.model_name],
+            "metadata": {"task_type": "open_diagnosis", "model": self.model_name,
+                         "enabled_tools": ",".join(t.name for t in self.tools)},
+            "run_name": "open_diagnosis",
+        }
+        result = with_rate_limit_retry(self.agent.invoke, input_state, config=config)
+
+        tools_used = [m.name for m in result["messages"] if isinstance(m, ToolMessage)]
+        final = ""
+        for m in reversed(result["messages"]):
+            if isinstance(m, AIMessage) and not getattr(m, "tool_calls", None) and m.content:
+                final = m.content if isinstance(m.content, str) else str(m.content)
+                break
+        return {
+            "response": final,
+            "vision_used": n_attached > 0,
+            "n_images": n_attached,
+            "tools_used": tools_used,
+            "messages": result["messages"],
+        }
+
     def _run(
         self,
         task_type: str,
