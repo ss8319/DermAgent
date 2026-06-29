@@ -1590,7 +1590,9 @@ class RAGTool(BaseSkinTool):
         if self.preprocess is not None:
             del self.preprocess
             self.preprocess = None
-        # Note: We don't close the Qdrant client as it's lightweight
+        if self.client is not None:
+            self.client.close()
+            self.client = None
         self._derm1m_open_clip = None
         self._load_failed = False
         # Don't unload vqa_tool as it's a reference, not owned by us
@@ -2251,7 +2253,9 @@ class TextRAGTool(BaseSkinTool):
         self._token_false_id = None
         self._load_failed = False
         self._reranker_failed = False
-        # Note: We don't close the Qdrant client as it's lightweight
+        if self.client is not None:
+            self.client.close()
+            self.client = None
         super().unload()
         print("[TextRAGTool] Model unloaded.")
 
