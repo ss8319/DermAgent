@@ -3192,6 +3192,10 @@ End with FINAL_ANSWER: [your complete caption]"""
             if isinstance(m, AIMessage) and not getattr(m, "tool_calls", None) and m.content:
                 final = m.content if isinstance(m.content, str) else str(m.content)
                 break
+        # Normalise markdown-heading variant the model occasionally emits:
+        # "## FINAL ANSWER:" → "FINAL_ANSWER:" (space→underscore, strip ##)
+        import re as _re
+        final = _re.sub(r'##\s*FINAL\s+ANSWER\s*:', 'FINAL_ANSWER:', final)
         return {
             "response": final,
             "vision_used": n_attached > 0,
