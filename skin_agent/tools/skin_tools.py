@@ -1699,14 +1699,14 @@ class TextRAGTool(BaseSkinTool):
             from qdrant_client import QdrantClient
             from transformers import AutoModel, AutoTokenizer, AutoModelForCausalLM
 
-            # Connect to Qdrant. Embedded on-disk mode is opt-in via QDRANT_PATH
-            # (no default). If unset, fall back to the localhost server — this
-            # avoids the hidden default that previously made the embedded vs
-            # server choice silent. NOTE: a path-mode client locks the dir, so
-            # do not open the same QDRANT_PATH from RAGTool and TextRAGTool in
-            # one process (see create_tools() guard in benchmark_agent.py).
+            # Connect to Qdrant. Embedded on-disk mode is opt-in via
+            # QDRANT_TEXT_PATH (preferred for TextRAGTool, distinct from
+            # RAGTool's QDRANT_PATH) or QDRANT_PATH as fallback. Distinct paths
+            # are required when both rag and text_rag are enabled, because
+            # qdrant-client takes an exclusive directory lock in path mode.
+            # If neither env var is set, fall back to the localhost server.
             import os as _os
-            _qpath = _os.environ.get("QDRANT_PATH")
+            _qpath = _os.environ.get("QDRANT_TEXT_PATH") or _os.environ.get("QDRANT_PATH")
             if _qpath:
                 print(f"[TextRAGTool] Using embedded Qdrant at {_qpath} ...")
                 self.client = QdrantClient(path=_qpath)

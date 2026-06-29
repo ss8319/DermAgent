@@ -1624,15 +1624,20 @@ def create_tools(
         enabled_tools = ["panderm", "make", "rag"]
 
     # Guard against a Qdrant embedded-mode lock collision. RAGTool and TextRAGTool
-    # both default to ./qdrant_storage in path mode; qdrant-client takes an
-    # exclusive lock on the directory, so the second loader crashes if both are
-    # enabled in the same process. Either disable one, or set distinct
-    # QDRANT_PATH values for each.
+    # both read embedded-mode storage dirs via env: RAGTool from QDRANT_PATH, and
+    # TextRAGTool from QDRANT_TEXT_PATH (falling back to QDRANT_PATH). qdrant-
+    # client takes an exclusive lock on the directory in path mode, so if both
+    # tools end up resolving to the SAME dir, the second loader crashes. Allow
+    # both tools when distinct dirs are configured.
     if "rag" in enabled_tools and "text_rag" in enabled_tools:
-        raise ValueError(
-            "rag and text_rag share a Qdrant path lock — enable only one, or "
-            "set separate QDRANT_PATH values for each."
-        )
+        _rag_p  = os.environ.get("QDRANT_PATH")
+        _text_p = os.environ.get("QDRANT_TEXT_PATH") or _rag_p
+        if _rag_p and _text_p and os.path.abspath(_rag_p) == os.path.abspath(_text_p):
+            raise ValueError(
+                "rag and text_rag would share the same Qdrant path "
+                f"({os.path.abspath(_rag_p)}) — exclusive lock collision. "
+                "Set QDRANT_TEXT_PATH to a different directory than QDRANT_PATH."
+            )
 
     tools = []
     dermogpt_tool = None

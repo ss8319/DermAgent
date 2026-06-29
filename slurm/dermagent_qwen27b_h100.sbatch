@@ -40,12 +40,14 @@ set -euo pipefail
 
 # ── User-configurable paths ────────────────────────────────────────────────
 # Edit these four variables for your cluster layout:
-SGLANG_REPO="/path/to/sglang"          # sglang repo root (contains slurm/env.sh)
-AGENT_ROOT="/path/to/DermAgent"         # this repo
-BENCH_ROOT="/path/to/dermarena_dx/stratified"
-HF_WEIGHTS_CACHE="/path/to/.hf_cache"  # where Qwen3.5-27B weights live
-PY="${AGENT_ROOT}/venv/bin/python3"     # python with DermAgent deps installed
+SGLANG_REPO="/fs04/scratch2/ub62/ssim0070/sglang"
+AGENT_ROOT="/fs04/scratch2/ub62/ssim0070/DermAgent"
+BENCH_ROOT="/fs04/scratch2/ub62/ssim0070/dermarena_dx/stratified"
+HF_WEIGHTS_CACHE="/fs04/scratch2/ub62/ssim0070/sglang/hf_cache"
+PY="/fs04/scratch2/ub62/ssim0070/dermagent/bin/python3"
 # ──────────────────────────────────────────────────────────────────────────
+# Smoke mode: cap each task at N cases. Unset/empty = full run.
+SMOKE_LIMIT="${SMOKE_LIMIT:-10}"
 
 source "${SGLANG_REPO}/slurm/env.sh"
 
@@ -149,7 +151,7 @@ cd "${AGENT_ROOT}"
     --max-loaded-models 2 \
     --max-tool-calls 15 \
     --recursion-limit 60 \
-    --output "${OUT_DIR}/mm_rds_dev1000_predictions.jsonl"
+    --limit ${SMOKE_LIMIT} --output "${OUT_DIR}/mm_rds_smoke_predictions.jsonl"
 echo "[task] MM_RDS done $(date)"
 
 # ── 5. Run MM_RDC ──────────────────────────────────────────────────────────
@@ -165,7 +167,7 @@ echo "==========================================" && echo "[task] MM_RDC startin
     --max-loaded-models 2 \
     --max-tool-calls 15 \
     --recursion-limit 60 \
-    --output "${OUT_DIR}/mm_rdc_dev1000_predictions.jsonl"
+    --limit ${SMOKE_LIMIT} --output "${OUT_DIR}/mm_rdc_smoke_predictions.jsonl"
 echo "[task] MM_RDC done $(date)"
 
 # ── 6. Run DxTest ──────────────────────────────────────────────────────────
@@ -181,6 +183,6 @@ echo "==========================================" && echo "[task] DxTest startin
     --max-loaded-models 2 \
     --max-tool-calls 15 \
     --recursion-limit 60 \
-    --output "${OUT_DIR}/dxtest_dev1000_predictions.jsonl"
+    --limit ${SMOKE_LIMIT} --output "${OUT_DIR}/dxtest_smoke_predictions.jsonl"
 echo "[task] DxTest done $(date)"
 echo "==========================================" && echo "[job] All tasks complete. $(date)" && echo "=========================================="
