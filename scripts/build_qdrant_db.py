@@ -71,10 +71,10 @@ def load_dermlip_model():
 
 def build_qdrant_index():
     print(f"Running on device: {DEVICE}")
-    # REPRO PATCH: prefer embedded on-disk Qdrant via QDRANT_PATH (no server
-    # needed on the cluster); RAGTool reads the 'derm1m' collection from the same
-    # path. Falls back to the localhost server only if QDRANT_PATH is set to "".
-    _qpath = os.environ.get("QDRANT_PATH", "./qdrant_storage")
+    # Embedded on-disk Qdrant is opt-in via QDRANT_PATH (no default); RAGTool
+    # reads the 'derm1m' collection from the same path. If QDRANT_PATH is unset,
+    # connect to the localhost server instead — no silent default mode.
+    _qpath = os.environ.get("QDRANT_PATH")
     if _qpath:
         print(f"Using embedded Qdrant at {_qpath} ...")
         client = QdrantClient(path=_qpath)

@@ -168,11 +168,10 @@ def build_rag_index() -> None:
     print("\nLoading embedding model...")
     tokenizer, model = load_model(use_4bit=USE_4BIT)
 
-    # Connect to Qdrant. REPRO PATCH: prefer embedded on-disk mode via QDRANT_PATH
-    # (no server needed on the cluster); writes the collection to disk for
-    # TextRAGTool to read later. Falls back to the localhost server if QDRANT_PATH
-    # is explicitly set to "".
-    _qpath = os.environ.get("QDRANT_PATH", "./qdrant_storage")
+    # Embedded on-disk Qdrant is opt-in via QDRANT_PATH (no default); writes the
+    # collection to disk for TextRAGTool to read later. If QDRANT_PATH is unset,
+    # connect to the localhost server instead — no silent default mode.
+    _qpath = os.environ.get("QDRANT_PATH")
     if _qpath:
         print(f"\nUsing embedded Qdrant at {_qpath} ...")
         client = QdrantClient(path=_qpath)

@@ -62,6 +62,11 @@ MODEL_ALIASES = {
     "o1": "o1",
     "o1-mini": "o1-mini",
     "o1-preview": "o1-preview",
+    # Local SGLang-served backbone (set OPENAI_BASE_URL to the local Qwen3.5-27B
+    # SGLang endpoint, e.g. http://m3h111:30005/v1). Rule-1 caveat: backbone
+    # temperature is hard-coded to 0.1 below for reproducibility — deviates
+    # from Qwen3.5-27B's official thinking_general preset (T=1.0).
+    "Qwen/Qwen3.5-27B": "Qwen/Qwen3.5-27B",
 }
 
 def resolve_model_name(model_name: str) -> str:
@@ -1617,7 +1622,18 @@ def create_tools(
     # Enable all tools by default
     if enabled_tools is None:
         enabled_tools = ["panderm", "make", "rag"]
-    
+
+    # Guard against a Qdrant embedded-mode lock collision. RAGTool and TextRAGTool
+    # both default to ./qdrant_storage in path mode; qdrant-client takes an
+    # exclusive lock on the directory, so the second loader crashes if both are
+    # enabled in the same process. Either disable one, or set distinct
+    # QDRANT_PATH values for each.
+    if "rag" in enabled_tools and "text_rag" in enabled_tools:
+        raise ValueError(
+            "rag and text_rag share a Qdrant path lock — enable only one, or "
+            "set separate QDRANT_PATH values for each."
+        )
+
     tools = []
     dermogpt_tool = None
     

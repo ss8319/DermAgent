@@ -1590,6 +1590,9 @@ class RAGTool(BaseSkinTool):
         if self.preprocess is not None:
             del self.preprocess
             self.preprocess = None
+        # Close the Qdrant client to release the path-mode directory lock —
+        # otherwise an LRU reload of TextRAGTool (or another RAGTool) on the
+        # same QDRANT_PATH crashes on the second open.
         if self.client is not None:
             self.client.close()
             self.client = None
@@ -1696,12 +1699,14 @@ class TextRAGTool(BaseSkinTool):
             from qdrant_client import QdrantClient
             from transformers import AutoModel, AutoTokenizer, AutoModelForCausalLM
 
-            # Connect to Qdrant. REPRO PATCH: prefer embedded on-disk mode via
-            # QDRANT_PATH (mirrors RAGTool + build_qdrant_rag.py) so no server is
-            # needed. NOTE: a path-mode client locks the dir, so do not open the
-            # same QDRANT_PATH from RAGTool and TextRAGTool in one process.
+            # Connect to Qdrant. Embedded on-disk mode is opt-in via QDRANT_PATH
+            # (no default). If unset, fall back to the localhost server — this
+            # avoids the hidden default that previously made the embedded vs
+            # server choice silent. NOTE: a path-mode client locks the dir, so
+            # do not open the same QDRANT_PATH from RAGTool and TextRAGTool in
+            # one process (see create_tools() guard in benchmark_agent.py).
             import os as _os
-            _qpath = _os.environ.get("QDRANT_PATH", "./qdrant_storage")
+            _qpath = _os.environ.get("QDRANT_PATH")
             if _qpath:
                 print(f"[TextRAGTool] Using embedded Qdrant at {_qpath} ...")
                 self.client = QdrantClient(path=_qpath)
@@ -2253,6 +2258,9 @@ class TextRAGTool(BaseSkinTool):
         self._token_false_id = None
         self._load_failed = False
         self._reranker_failed = False
+        # Close the Qdrant client to release the path-mode directory lock —
+        # otherwise an LRU reload of RAGTool (or another TextRAGTool) on the
+        # same QDRANT_PATH crashes on the second open.
         if self.client is not None:
             self.client.close()
             self.client = None
