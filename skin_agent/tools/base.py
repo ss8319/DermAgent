@@ -243,6 +243,11 @@ class ImageQueryInput(BaseModel):
         description="Path to the skin/dermoscopic image file"
     )
     query: str = Field(
+        # REPRO PATCH: give `query` a default. ImageQueryInput is used only by
+        # Qwen3VLTool; when the agent (GPT-4o) called qwen_vqa without a query the
+        # pydantic validation failed before _run (ValidationError for
+        # ImageQueryInput). A default makes the tool robust to that omission.
+        default="Describe the key dermatological findings and the most likely diagnosis for this lesion.",
         description="Natural language question about the image"
     )
     target_concepts: Optional[str] = Field(

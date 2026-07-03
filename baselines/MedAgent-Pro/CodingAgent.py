@@ -105,7 +105,7 @@ class Coding_Agent:
         self,
         output_file: str,
         requirement: str,
-        model: str = "chatgpt-4o-latest",
+        model: str = "gpt-4o",
         enforce_function_name: Optional[str] = None,
         extra_context: Optional[str] = None,
     ) -> str:

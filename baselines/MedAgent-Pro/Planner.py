@@ -316,7 +316,7 @@ class Planner:
         return cleaned
 
     def plan(self, output_path, prompt, rag_text, filename="plan.json",
-             model="chatgpt-4o-latest", toolset=None):
+             model="gpt-4o", toolset=None):
         os.makedirs(output_path, exist_ok=True)
         messages = self._build_messages(rag_text, prompt, toolset)
 

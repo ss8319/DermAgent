@@ -74,3 +74,21 @@ flagged/
 # ============================================
 .DS_Store
 Thumbs.db
+
+# --- reproduction artifacts (not source) ---
+.repro_logs/
+Derm1M/
+MAKE/
+model-weights/
+datasets/
+results/
+qdrant_storage/
+.env
+baselines/MedAgent-Pro/Dermatology/*/record/
+baselines/MedAgent-Pro/Dermatology/*/plan.json
+baselines/MedAgent-Pro/Dermatology/*/tools/
+baselines/MedAgent-Pro/Dermatology/*/__init__.py
+baselines/MedAgent-Pro/Dermatology/*/toolset.json.orig
+
+# guideline-RAG source chunks (local only, not redistributed)
+RAG/
