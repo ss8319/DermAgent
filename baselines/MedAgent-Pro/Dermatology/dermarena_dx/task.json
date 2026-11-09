@@ -1,0 +1,4 @@
+{
+    "input": "Clinical case report of the patient (history, examination and test results) with zero or more medical images (clinical photographs, dermoscopy, histopathology, radiology)",
+    "disease": "Diagnose potential {disease}"
+}

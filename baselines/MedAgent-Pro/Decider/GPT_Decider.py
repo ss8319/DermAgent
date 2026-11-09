@@ -12,6 +12,7 @@ import os
 import json
 import base64
 from openai import OpenAI
+from mp_llm import mp_create  # DermArena v1: env-configurable backbone + full trace
 
 class GPT_Decider:
     def __init__(self, api_key):
@@ -61,10 +62,7 @@ class GPT_Decider:
             }]}
         ]
 
-        completion = self.client.chat.completions.create(
-            model="gpt-4o",
-            messages=messages
-        )
+        completion = mp_create(self.client, messages, model_default="gpt-4o", module="gpt_decider")
         result = completion.choices[0].message.content
 
         if os.path.exists(output_file):

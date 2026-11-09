@@ -8,4 +8,4 @@
 # Modifications by the DermAgent authors for dermatology benchmarks.
 # =============================================================================
 
-from .skin_tools import panderm_classify, make_annotate, rag_retrieve
+from .skin_tools import panderm_classify, make_annotate, rag_retrieve, panderm_scores, make_concepts, dermogpt_vqa

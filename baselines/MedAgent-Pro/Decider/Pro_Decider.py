@@ -12,6 +12,7 @@ import os
 import json
 import base64
 from openai import OpenAI
+from mp_llm import mp_create  # DermArena v1: env-configurable backbone + full trace
 
 class Pro_Decider:
     def __init__(self, api_key: str):
@@ -161,10 +162,7 @@ class Pro_Decider:
             }]}
         ]
 
-        completion = self.client.chat.completions.create(
-            model="gpt-4o",
-            messages=messages
-        )
+        completion = mp_create(self.client, messages, model_default="gpt-4o", module="pro_decider")
         raw = completion.choices[0].message.content
         obj = self.safe_json_parse(raw)
 

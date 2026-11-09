@@ -51,6 +51,22 @@ DERM_RAG_URLS = [
 # Per-task configuration
 # ============================================================================
 TASK_CONFIGS = {
+    # DermArena v1 T1.1/T1.2 (2026-11-05): task-1 config with the minimal open-set edits — the
+    # dermoscopy-only line becomes "case report + any image type", the closed candidate list becomes a
+    # ranked top-5. Web-RAG stays disabled as for tasks 1-3 (REPRO PATCH below).
+    4: {
+        "data_root": "Dermatology/dermarena_dx",
+        "rag_prompt": "",
+        "domain_hint": (
+            "Important domain context for dermatology:\n"
+            "- Each case is a clinical case report (history, examination, test results) with zero or more "
+            "images: clinical photographs, dermoscopy, histopathology or radiology.\n"
+            "- Use zero-shot classification (tool 2) for initial differential diagnosis.\n"
+            "- Use concept annotation (tool 3) to extract evidence-based visual features.\n"
+            "- Use VLM (tool 1) for qualitative assessment integrating ALL prior evidence and the case text.\n"
+            "- The final qualitative step should determine the 5 most likely diagnoses, ranked.\n"
+        ),
+    },
     1: {
         "data_root": "Dermatology/task1_diagnosis",
         "rag_prompt": (
@@ -178,6 +194,8 @@ def main():
 
         # Run planner
         print(f"[Planner] Generating plan with {args.model}...")
+        from mp_llm import start_case_trace
+        _tr = start_case_trace()  # full planner exchange -> plan_trace.json (audit)
         plan = planner.plan(
             data_root,
             prompt,
@@ -186,6 +204,8 @@ def main():
             toolset=toolset,
             model=args.model,
         )
+        with open(os.path.join(data_root, "plan_trace.json"), "w") as f:
+            json.dump(_tr, f, indent=1, default=str)
         print(f"[Planner] Generated {len(plan)} steps → {data_root}/plan.json")
         for step in plan:
             print(

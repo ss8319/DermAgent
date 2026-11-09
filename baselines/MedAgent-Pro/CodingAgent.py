@@ -12,6 +12,7 @@
 import os
 import re
 from openai import OpenAI
+from mp_llm import mp_create  # DermArena v1: env-configurable backbone + full trace
 from typing import Optional
 
 class Coding_Agent:
@@ -115,10 +116,7 @@ class Coding_Agent:
             extra_context=extra_context,
         )
 
-        completion = self.client.chat.completions.create(
-            model=model,
-            messages=messages
-        )
+        completion = mp_create(self.client, messages, model_default=model, module="coding_agent")
         raw = completion.choices[0].message.content or ""
         code = self._strip_fences(raw)
 

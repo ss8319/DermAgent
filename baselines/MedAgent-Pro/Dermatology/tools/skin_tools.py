@@ -20,7 +20,9 @@ Each wrapper:
 
 import json
 import os
+import re
 import sys
+import threading
 from pathlib import Path
 
 # DermAgent project root: baselines/MedAgent-Pro/Dermatology/tools -> DermAgent_submission/
@@ -34,6 +36,7 @@ if _PROJECT_ROOT not in sys.path:
 _panderm_tool = None
 _make_tool = None
 _rag_tool = None
+_dermogpt_tool = None
 
 _DEVICE = os.environ.get("CUDA_VISIBLE_DEVICES_TOOL", "cuda")
 
@@ -60,6 +63,14 @@ def _get_rag():
         from skin_agent.tools.skin_tools import RAGTool
         _rag_tool = RAGTool(device=_DEVICE)
     return _rag_tool
+
+
+def _get_dermogpt():
+    global _dermogpt_tool
+    if _dermogpt_tool is None:
+        from skin_agent.tools.skin_tools import DermoGPTTool
+        _dermogpt_tool = DermoGPTTool(device=_DEVICE)
+    return _dermogpt_tool
 
 
 # ---------------------------------------------------------------------------
@@ -89,7 +100,17 @@ def panderm_classify(image_path: str, save_dir: str, save_name: str) -> str:
     MedAgent-Pro's Case_level quantitative step dispatcher.
     """
     tool = _get_panderm()
-    result_str = tool._run(image_path=image_path)
+    # DermArena v1 (owner 2026-11-05): PanDerm scores the BACKBONE's own top-10 differential (same as DermAgent), not
+    # the HAM10000 default list. The runner writes <save_dir>/candidates.json = {"diagnoses": [10 names]} before the
+    # plan runs; absent file = original behaviour (tool default list).
+    cand = None
+    cf = os.path.join(save_dir, "candidates.json")
+    if os.path.exists(cf):
+        try:
+            cand = ", ".join(json.load(open(cf, encoding="utf-8"))["diagnoses"]) or None
+        except Exception:  # noqa: BLE001
+            cand = None
+    result_str = tool._run(image_path=image_path, candidate_diseases=cand) if cand else tool._run(image_path=image_path)
     _merge_json(save_dir, save_name, "panderm_classification", result_str)
     return result_str
 
@@ -114,3 +135,69 @@ def rag_retrieve(image_path: str, save_dir: str, save_name: str) -> str:
     result_str = tool._run(image_path=image_path, top_k=5)
     _merge_json(save_dir, save_name, "rag_similar_cases", result_str)
     return result_str
+
+
+# ---------------------------------------------------------------------------
+# DermArena v1 per-candidate bridges (2026-11-07). Each returns structured data and raises ToolError instead of passing
+# on a tool's "Error ..." text; the runner stores the result under step_<id> (no tool-named keys, so a later step reads
+# its own evidence and never the whole file). The DermAgent tool classes are not edited: a live experiment imports them.
+# ---------------------------------------------------------------------------
+class ToolError(RuntimeError):
+    """The tool returned an error text or a placeholder. The runner records it; that evidence is simply absent."""
+
+
+_PANDERM_LOCK = threading.Lock()   # _panderm_softmax bypasses PanDermTool._run, so the runner's class lock does not cover it
+_MAKE_ROW = re.compile(r"^\s*\d+\.\s+(.+?):\s+([0-9.]+)\s*$")
+
+
+def _check_text(out, tool):
+    t = out if isinstance(out, str) else ""
+    if not t.strip() or t.lstrip().lower().startswith("error") or "[Model not available]" in t:
+        raise ToolError(f"{tool}: {t[:300]!r}")
+    return t
+
+
+def _panderm_softmax(tool, image_path, diseases):
+    """Same computation as PanDermTool._run (which prints only its top 5), returning the whole softmax."""
+    import numpy as np
+    import torch
+    from PIL import Image
+    from skin_agent.tools.skin_tools import resolve_image_path, validate_image_path
+    img_path = validate_image_path(resolve_image_path(image_path))
+    tool._ensure_initialized()
+    image_tensor = tool.preprocess(Image.open(img_path).convert("RGB")).unsqueeze(0).to(tool.device)
+    text_features = tool._build_text_features(diseases)
+    with torch.no_grad():
+        img_features = tool.model.encode_image(image_tensor)
+        img_features = img_features / img_features.norm(dim=-1, keepdim=True)
+        probs = (100.0 * img_features @ text_features.T).softmax(dim=-1).cpu().numpy()[0]
+    return [float(x) for x in np.asarray(probs)]
+
+
+def panderm_scores(image_path: str, diseases: list) -> dict:
+    """{disease: probability} for ALL candidates, comma-free names as given (fixes the 5-of-10 print limit)."""
+    tool = _get_panderm()
+    with _PANDERM_LOCK:
+        probs = _panderm_softmax(tool, image_path, list(diseases))
+    return dict(zip(diseases, probs))
+
+
+def make_concepts(image_path: str, concepts: list) -> dict:
+    """MAKE target mode: {concept: presence score}, parsed from the tool's numbered text."""
+    tool = _get_make()
+    text = _check_text(tool._run(image_path=image_path, target_concepts=", ".join(concepts)), "MAKE")
+    scores = {}
+    for line in text.splitlines():
+        m = _MAKE_ROW.match(line)
+        if m:
+            scores[m.group(1)] = float(m.group(2))
+    if set(scores) != set(concepts):
+        raise ToolError(f"MAKE: expected {sorted(concepts)}, parsed {sorted(scores)}")
+    return scores
+
+
+def dermogpt_vqa(image_path: str, query: str) -> str:
+    """DermoGPT free-form VQA on one image (the tool's VQA mode: no candidate list, no concept list)."""
+    tool = _get_dermogpt()
+    text = _check_text(tool._run(image_path=image_path, query=query), "DermoGPT")
+    return text.split("DermoGPT VQA Response:", 1)[-1].strip()
