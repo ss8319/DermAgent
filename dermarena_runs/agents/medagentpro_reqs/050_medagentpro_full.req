@@ -1,0 +1,14 @@
+# 050 — MedAgent-Pro x Qwen3.5-27B FULL run, T1.1 (2,806) + T1.2 (2,030) test. Queue only after the owner has read 040's
+# PLANS_SAMPLE.txt and touched the namespace REVIEWED file it names (the runner refuses otherwise -> failed/).
+# Resumable by _id: if the allocation ends first, requeue this file (same settings) and it continues. Plans made by the canary
+# are reused from the cache.
+MODEL=Qwen/Qwen3.5-27B
+SERVE_ARGS="--tp-size 2 --reasoning-parser qwen3 --tool-call-parser qwen3_coder --mem-fraction-static 0.90 --cuda-graph-max-bs 64 --mamba-full-memory-ratio 2.0"
+CTX=131072
+source /fs04/scratch2/ub62/ssim0070/benchmark_runs/local_weights.sh; local_weights "$MODEL" || return 1
+[ "$MODEL|${CTX:-65536}|${SERVE_ARGS:-}" != "${CUR:-}" ] && bash /fs04/scratch2/ub62/ssim0070/benchmark_runs/clean_gpu.sh
+run() {
+  MP_SLUG=medagentpro-qwen3.5-27b MP_BACKBONE=Qwen/Qwen3.5-27B MP_TOOL_GPUS="2 3" MP_NPROC=2 MP_THREADS=24 MP_ALLOC_CONF=expandable_segments:True \
+    MP_SERVER_ARGS="$SERVE_ARGS --context-length $CTX" bash /fs04/scratch2/ub62/ssim0070/benchmark_runs/tools/guarded.sh "${OPENROUTER_BASE_URL%/v1}/health" \
+    bash /fs04/scratch2/ub62/ssim0070/benchmark_runs/agents/run_medagentpro_v1.sh full
+}

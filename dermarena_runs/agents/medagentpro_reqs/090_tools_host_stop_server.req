@@ -1,0 +1,5 @@
+# 090 (h100x4c, 11-12): after the Qwen MedAgent-Pro takeover (020) ends, stop this holder's Qwen server so all 4 H100s become
+# MedAgent-Pro tool slots (this job is in agents/mp_tool_hosts.txt; agents/mp_fn_supervisor.sh places Flash-Next runners' tools here).
+# MODEL=__tools_host__: no server starts; the request lands in failed/ by design and the holder idles with free GPUs.
+MODEL=__tools_host__; CTX=1024; SERVE_ARGS=""
+run() { return 0; }

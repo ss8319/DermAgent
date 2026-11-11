@@ -1,0 +1,12 @@
+# 040 (surplus q01h100 holder, 4 GPUs) — ABLATION: GLM-4.6V findings-kept inference (4 GPUs; 201 GB download). Runs only when this holder is surplus for the agents (its agent
+# request returned 3), and hands the GPU back the moment the agent work needs it (owner 11-09: agents first). agents/mp_ablation_yield.sh
+MODEL=zai-org/GLM-4.6V
+SERVE_ARGS="--tp-size 4 --reasoning-parser glm45 --cuda-graph-max-bs 128"
+CTX=131072
+source /fs04/scratch2/ub62/ssim0070/benchmark_runs/local_weights.sh; local_weights "$MODEL" || return 1
+[ "$MODEL|${CTX:-65536}|${SERVE_ARGS:-}" != "${CUR:-}" ] && bash /fs04/scratch2/ub62/ssim0070/benchmark_runs/clean_gpu.sh
+run() {
+  local B=/fs04/scratch2/ub62/ssim0070/benchmark_runs
+  Q=$Q REQ_SELF=$B/agents/medagentpro_reqs/040_abl_glmK_yield_q01h100.req bash $B/agents/mp_ablation_yield.sh $B/dx/medagentpro-qwen3.5-27b/locks/shard0:$B/dx/medagentpro-qwen3.5-27b/locks/shard1 $B/agents/medagentpro_reqs/020_medagentpro_full_shards_h100x4c_v2.req $B/dx/glm-4.6v-findingskept/yield_lock -- \
+    env DX_EXAMINEE_CONTEXT=131072 bash $B/tools/guarded.sh "${OPENROUTER_BASE_URL%/v1}/health" bash $B/dx/run_dx_model_findingskept.sh zai-org/GLM-4.6V glm-4.6v-findingskept 128
+}

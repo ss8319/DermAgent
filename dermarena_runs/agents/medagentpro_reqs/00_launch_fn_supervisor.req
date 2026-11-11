@@ -1,0 +1,7 @@
+# 00 (a40tools, 11-12): start agents/mp_fn_supervisor.sh as a background process of THIS holder (A40 desktop job, ends 18 Nov 02:26,
+# not preemptible), so the Flash-Next runner clients live in a persistent job. The supervisor is a flock singleton.
+# MODEL=__tools_host__: no server is started here (the request lands in failed/ by design; the GPU stays a tools host).
+setsid nohup bash /fs04/scratch2/ub62/ssim0070/benchmark_runs/agents/mp_fn_supervisor.sh \
+  >> /fs04/scratch2/ub62/ssim0070/benchmark_runs/dx/medagentpro-qwen3.8-flash-next/logs/fn_supervisor.out 2>&1 < /dev/null &
+MODEL=__tools_host__; CTX=1024; SERVE_ARGS=""
+run() { return 0; }

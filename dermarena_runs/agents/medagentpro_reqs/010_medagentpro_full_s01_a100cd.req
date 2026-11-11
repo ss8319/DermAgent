@@ -1,0 +1,20 @@
+# 010 (gpu2a100c / gpu2a100d) — Qwen FULL shards 0-1 of 4 if this holder gets the shards01 lock first; tools on L40S GPUs 2-3.
+MODEL=Qwen/Qwen3.5-27B
+SERVE_ARGS="--tp-size 2 --reasoning-parser qwen3 --tool-call-parser qwen3_coder --mem-fraction-static 0.90 --cuda-graph-max-bs 64 --mamba-full-memory-ratio 2.0"
+CTX=131072
+source /fs04/scratch2/ub62/ssim0070/benchmark_runs/local_weights.sh; local_weights "$MODEL" || return 1
+[ "$MODEL|${CTX:-65536}|${SERVE_ARGS:-}" != "${CUR:-}" ] && bash /fs04/scratch2/ub62/ssim0070/benchmark_runs/clean_gpu.sh
+run() {
+  local B=/fs04/scratch2/ub62/ssim0070/benchmark_runs S=medagentpro-qwen3.5-27b L=61714874 D=/fs04/scratch2/ub62/ssim0070/benchmark_runs/dx/medagentpro-qwen3.5-27b
+  # 11-09: non-blocking. Another RUNNING job owns this agent work -> this holder is surplus: return 3 and the holder moves on to
+  # its ablation requests, which hand the GPU back as soon as the agent work needs it (agents/mp_ablation_yield.sh)
+  NOWAIT=1 bash $B/agents/mp_shard_lock.sh $D/locks/shards01 $SLURM_JOB_ID || { echo "surplus: shards01 owned by a running job"; return 3; }
+  # release the lock when this request ends (finished, stopped or killed), so the next holder can resume shards 0-1 at once
+  trap '[ "$(cat $D/locks/shards01/owner 2>/dev/null)" = "$SLURM_JOB_ID" ] && rm -rf $D/locks/shards01' EXIT
+  # the A100 servers run shards 0-1 as extras while no replacement exists (11-09): raise the flag, give them time to stop
+  echo $SLURM_JOB_ID > $D/locks/TAKEOVER_01; echo "takeover flag raised $(date)"; sleep 120
+  local URL=${OPENROUTER_BASE_URL/127.0.0.1/$(hostname)}
+  MP_REMOTE_CPUS=4 MP_REMOTE_MEM=24G bash $B/tools/guarded.sh "${OPENROUTER_BASE_URL%/v1}/health" bash $B/agents/run_medagentpro_remote_v2.sh $L "$URL" full \
+    MP_SLUG=$S MP_BACKBONE=Qwen/Qwen3.5-27B "MP_TOOL_GPUS='2 3'" MP_NPROC=2 MP_THREADS=32 MP_SHARD_BASE=0 MP_SHARD_TOTAL=4 \
+    MP_ALLOC_CONF=expandable_segments:True "MP_SERVER_ARGS='$SERVE_ARGS --context-length $CTX'"
+}

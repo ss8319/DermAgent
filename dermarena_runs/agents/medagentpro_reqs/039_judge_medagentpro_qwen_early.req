@@ -1,0 +1,14 @@
+# 039 (gpu2a100, 11-12 09:40) — EARLY judge of MedAgent-Pro x Qwen3.5-27B: T1.1 is complete (2,806 merged) and gpu2a100's Qwen
+# server is idle (shard 2 finished). Judges every case in the CURRENT merged predictions.jsonl (T1.1 all; T1.2 the 1,632 merged so far).
+# Resumable: the deferred 040/041 final judge later grades only the remaining T1.2 cases and rewrites SCORE.txt (the SCORE.txt this
+# writes is PARTIAL for T1.2 — ignore it until JUDGE_DONE from the final run).
+MODEL=Qwen/Qwen3.6-27B
+SERVE_ARGS="--dp-size 2 --reasoning-parser qwen3 --mem-fraction-static 0.90 --cuda-graph-max-bs 128 --mamba-full-memory-ratio 2.0"
+CTX=32768
+B0=/fs04/scratch2/ub62/ssim0070/benchmark_runs
+source $B0/local_weights.sh; local_weights "$MODEL" || return 1
+[ "$MODEL|${CTX:-65536}|${SERVE_ARGS:-}" != "${CUR:-}" ] && bash $B0/clean_gpu.sh
+run() {
+  echo "[mp-judge-early] $(date '+%m-%d %H:%M') start"
+  DX_JUDGE_PASSES=3 DX_JUDGE_WORKERS=48 bash $B0/tools/guarded.sh "${OPENROUTER_BASE_URL%/v1}/health" bash $B0/dx/judge_dx.sh medagentpro-qwen3.5-27b
+}
