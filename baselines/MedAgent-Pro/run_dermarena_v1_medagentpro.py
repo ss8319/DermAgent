@@ -1511,7 +1511,7 @@ def run_task(ctx, task, out_dir, todo, k, threads):
 
     for p in (1, 2):
         if p == 2:
-            have = v1.done_ids(out_dir)
+            have = v1.done_ids(out_dir, ctx["run_sig"])
             todo = [r for r in todo if r["_id"] not in have]
             if not todo:
                 break
@@ -1724,7 +1724,7 @@ def main():
             out_dir.mkdir(parents=True, exist_ok=True)
             rows = [json.loads(l) for l in inp.open() if l.strip()]
             mine = [r for i, r in enumerate(rows) if i % n == k]
-            have = v1.done_ids(out_dir)
+            have = v1.done_ids(out_dir, run_sig)
             todo = [r for r in mine if r["_id"] not in have]
             if limit:
                 todo = todo[:limit]

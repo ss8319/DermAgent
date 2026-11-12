@@ -192,27 +192,46 @@ def lock_tool_classes(tools):
         cls._dermarena_locked = True
 
 
-def done_ids(out_dir: Path):
+def done_ids(out_dir: Path, run_sig=None):
+    """_ids that already have a row. With run_sig, only rows of that run_sig count: a row written with other settings
+    (e.g. RUN_META unreadable at start, DX_ALLOW_META_CHANGE, a seeded canary) is re-run, never resumed into this run."""
     ids = set()
     for f in list(out_dir.glob("predictions.p*.jsonl")) + [out_dir / "predictions.jsonl"]:
         if f.exists():
             for l in f.open():
                 try:
-                    ids.add(json.loads(l)["_id"])
+                    r = json.loads(l)
+                    if run_sig is None or r.get("run_sig") == run_sig:
+                        ids.add(r["_id"])
                 except Exception:  # noqa: BLE001
                     pass
     return ids
 
 
-def merge(out_dir: Path):
+def merge(out_dir: Path, run_sig=None):
+    """One row per _id. run_sig (default: RUN_META.json's) wins over a row of other settings for the same _id; any row
+    of other settings that is still kept is reported as MIXED, never hidden."""
+    if run_sig is None:
+        try:
+            run_sig = json.loads((out_dir / "RUN_META.json").read_text()).get("run_sig")
+        except Exception:  # noqa: BLE001
+            run_sig = None
     rows = {}
     for f in sorted(out_dir.glob("predictions.p*.jsonl")):
         for l in f.open():
             try:
                 r = json.loads(l)
-                rows.setdefault(r["_id"], r)
+                cid = r["_id"]
             except Exception:  # noqa: BLE001
-                pass
+                continue
+            if cid not in rows or (run_sig and rows[cid].get("run_sig") != run_sig and r.get("run_sig") == run_sig):
+                rows[cid] = r
+    other = {}
+    for r in rows.values():
+        if run_sig and r.get("run_sig") != run_sig:
+            other[r.get("run_sig")] = other.get(r.get("run_sig"), 0) + 1
+    if other:
+        print(f"[merge] {out_dir}: MIXED run_sig — {sum(other.values())} row(s) not from run_sig {run_sig}: {other}", flush=True)
     # per-process temp name: several shard runners may merge the same folder at once (a shared name lets two writers
     # interleave into one file and then race on the rename)
     tmp = out_dir / f"predictions.jsonl.tmp{os.getpid()}.{threading.get_ident()}"
@@ -300,7 +319,7 @@ def main():
         out_dir.mkdir(parents=True, exist_ok=True)
         rows = [json.loads(l) for l in inp.open() if l.strip()]
         mine = [r for i, r in enumerate(rows) if i % n == k]
-        have = done_ids(out_dir)
+        have = done_ids(out_dir, run_sig)
         todo = [r for r in mine if r["_id"] not in have]
         if limit:
             todo = todo[: limit]
@@ -549,7 +568,7 @@ def run_task(task, out_dir, todo, k, n, threads, runner, dx_infer, run_sig, max_
 
     for p in (1, 2):
         if p == 2:
-            have = done_ids(out_dir)
+            have = done_ids(out_dir, run_sig)
             todo = [r for r in todo if r["_id"] not in have]
             if not todo:
                 break
