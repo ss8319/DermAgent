@@ -211,11 +211,13 @@ def merge(out_dir: Path):
                 rows.setdefault(r["_id"], r)
             except Exception:  # noqa: BLE001
                 pass
-    tmp = out_dir / "predictions.jsonl.tmp"
+    # per-process temp name: several shard runners may merge the same folder at once (a shared name lets two writers
+    # interleave into one file and then race on the rename)
+    tmp = out_dir / f"predictions.jsonl.tmp{os.getpid()}.{threading.get_ident()}"
     with tmp.open("w") as fo:
         for r in rows.values():
             fo.write(json.dumps(r, ensure_ascii=False) + "\n")
-    tmp.rename(out_dir / "predictions.jsonl")
+    os.replace(tmp, out_dir / "predictions.jsonl")
     print(f"[merge] {out_dir}: {len(rows)} rows -> predictions.jsonl")
 
 
