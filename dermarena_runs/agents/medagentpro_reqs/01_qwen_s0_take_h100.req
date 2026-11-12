@@ -1,0 +1,8 @@
+# 01 (a40tools, 11-12 11:25): bdiimg (node failure 10:50) took Qwen shard 0's tools with it; v5 restarted shard 0 with tools on the A40,
+# where shard 1's tools already sit -> CUDA OOM loading DermoGPT. Start shard 0 now with its tools on the H100 job (PREFER_HOST, free
+# GPU memory there), backbone gpu2a100b's Qwen3.5-27B server, 64 threads. Background process of THIS holder (persistent A40 job).
+# MODEL=__tools_host__: no server starts here (request lands in failed/ by design).
+PREFER_HOST=62151003 setsid nohup bash /fs04/scratch2/ub62/ssim0070/benchmark_runs/agents/mp_take_shard.sh 0 http://m3n100:30734/v1 x 64 \
+  >> /fs04/scratch2/ub62/ssim0070/benchmark_runs/logs/qwen_s0_take_h100_20261112.out 2>&1 < /dev/null &
+MODEL=__tools_host__; CTX=1024; SERVE_ARGS=""
+run() { return 0; }
