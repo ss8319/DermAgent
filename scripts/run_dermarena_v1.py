@@ -139,9 +139,11 @@ def rgb_path(fp: Path) -> str:
         with _conv_lock:
             if not out.exists():
                 CONV_DIR.mkdir(parents=True, exist_ok=True)
-                tmp = out.with_suffix(".tmp.png")
+                # per-process temp name + atomic replace: the cache dir is shared by every runner on the node, and
+                # _conv_lock only covers this process (a shared temp name let two writers leave a torn PNG behind)
+                tmp = out.with_name(f"{out.stem}.{os.getpid()}.{threading.get_ident()}.tmp.png")
                 I.convert("RGB").save(tmp, format="PNG")
-                tmp.rename(out)
+                os.replace(tmp, out)
         return str(out)
 
 
