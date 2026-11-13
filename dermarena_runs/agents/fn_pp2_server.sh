@@ -5,10 +5,11 @@
 # otherwise idle until a 4x80 GB job starts (estimated tomorrow 13:40 at the earliest; new requests Nov 17).
 # Same model, weights, bf16, fp32 mamba state, context 81920 and sampling; memory/scheduling flags as the A100 plan (prefix cache off,
 # cap 96, prefill CUDA graph off). Gated by tools/fn_refcheck.py against the H200 reference before any case runs on it.
-# Cross-node traffic is pipeline activations only (small), so NCCL uses TCP on e1p1 (NCCL_IB_DISABLE=1): no RoCE setup needed.
+# Cross-node traffic is pipeline activations only (small), so NCCL uses TCP (NCCL_IB_DISABLE=1) on bond0.114: 11-13 19:30 test showed
+# e1p1 does NOT pass traffic between m3n100 and m3n108 (connect timed out; first launch died after 600 s), bond0.* all do.
 # Runs detached on the login node; light (sruns + curl). Stop: touch agents/FN_PP2_STOP (kills the server steps it started).
 B=/fs04/scratch2/ub62/ssim0070/benchmark_runs; FND=$B/dx/medagentpro-qwen3.8-flash-next; L=$FND/logs/fn_pp2.log
-J0=61981433; J1=61981434; H0=172.16.209.108; PORT=30777; DPORT=30778; URL=http://m3n108:$PORT/v1
+J0=61981433; J1=61981434; H0=172.16.205.171; PORT=30777; DPORT=30778; URL=http://m3n108:$PORT/v1
 STOP=$B/agents/FN_PP2_STOP
 log() { echo "$(date '+%m-%d %H:%M') [pp2] $*" | tee -a $L; }
 ovl() { local j=$1; shift; env $(env | grep -oE '^SLURM_[A-Z_]+' | grep -v '^SLURM_CONF' | sed 's/^/-u /') srun --jobid=$j --overlap "$@"; }
@@ -30,7 +31,7 @@ for rank in 1 0; do
     source $R/slurm/env.sh >/dev/null 2>&1
     exec apptainer exec --nv --home $CH:$CH --bind $R:$R --env HF_HUB_OFFLINE=1 --env TRANSFORMERS_OFFLINE=1 \
       --env FLASHINFER_WORKSPACE_DIR=$CH/.cache/flashinfer --env TRITON_CACHE_DIR=$CH/.triton --env TORCH_HOME=$CH/.cache/torch \
-      --env NCCL_IB_DISABLE=1 --env NCCL_SOCKET_IFNAME=e1p1 --env GLOO_SOCKET_IFNAME=e1p1 --env PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+      --env NCCL_IB_DISABLE=1 --env NCCL_SOCKET_IFNAME=bond0.114 --env GLOO_SOCKET_IFNAME=bond0.114 --env PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
       $C python3 -m sglang.launch_server --model-path /tmp/bench_weights/Qwen/Qwen3.8-Flash-Next --host 0.0.0.0 --port $PORT \
       --trust-remote-code --node-rank $rank $ARGS" > $FND/logs/fn_pp2_rank$rank.log 2>&1 < /dev/null &
   disown; sleep 20
