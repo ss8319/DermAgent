@@ -4,7 +4,7 @@
 B0=/fs04/scratch2/ub62/ssim0070/benchmark_runs
 if [ -f $Q/failed/10_fn_server_v2.req ] && [ ! -f $B0/dx/medagentpro-qwen3.8-flash-next/servers/REFCHECK_FAILED_$SLURM_JOB_ID ] \
    && ! nvidia-smi --query-gpu=name --format=csv,noheader | head -1 | grep -q H200; then
-  FN_MF=0.90; source $B0/agents/medagentpro_reqs/10_fn_server_v2.req
+  FN_MF=0.88; source $B0/agents/medagentpro_reqs/10_fn_server_v2.req
 else
   echo "[fn-v2] 11: nothing to retry (10 did not fail to start, or refcheck failed): stop the server"
   MODEL=__tools_host__; CTX=1024; SERVE_ARGS=""; run() { :; }
