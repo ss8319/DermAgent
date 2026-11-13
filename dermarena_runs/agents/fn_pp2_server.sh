@@ -47,6 +47,9 @@ grep -E "max_running_requests|avail mem|capped|KV Cache is allocated|Mamba Cache
 hist() { printf "%s\t%s\t%s\t%s\t%s\t%s\n" "$(date '+%F %T')" "$J0+$J1" "m3n108+m3n100" "A100-80GB-PCIe x4 (2 nodes, pp2)" "$1" "$ARGS" >> $FND/servers/history.tsv; }
 hist refcheck_start
 ovl $J0 -n1 -c2 --mem=4G python3 $B/tools/fn_refcheck.py compare "$URL" $B/diagnostics/flashnext_no_h200_20261113/refcheck >> $L 2>&1; rc=$?
+# 11-13 20:30: servers/PP2_REFCHECK_OVERRIDE (provisional use after a per-prompt-cap FAIL, see META_OVERRIDES.txt) lets a FAIL (rc=1,
+# not rc=2 "cannot run") proceed; owner deletes the file to reject.
+if [ $rc -eq 1 ] && [ -f $FND/servers/PP2_REFCHECK_OVERRIDE ]; then hist refcheck_FAIL_PROVISIONAL_OVERRIDE; log "REFCHECK FAIL but PP2_REFCHECK_OVERRIDE present: provisional use"; rc=0; fi
 if [ $rc -ne 0 ]; then hist refcheck_FAIL_rc$rc; log "REFCHECK FAIL rc=$rc: server NOT used; stopping it"
   echo "$(date '+%m-%d %H:%M') FN-PP2 REFCHECK FAIL rc=$rc: server not used" >> $B/logs/gpu_watchdog/alerts.log
   for J in $J0 $J1; do ovl $J -n1 -c1 --mem=512M bash -c 'pkill -u $USER -f "sglang.launch_server --model-path /tmp/bench_weights/Qwen/Qwen3.8-Flash-Next" ; true'; done; exit 1; fi
