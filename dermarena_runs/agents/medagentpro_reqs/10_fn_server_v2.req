@@ -14,6 +14,8 @@ MODEL=Qwen/Qwen3.8-Flash-Next; CTX=81920
 case "$GPU" in
   *H200*) SERVE_ARGS="--tp-size 4 --ep-size 4 --dtype bfloat16 --reasoning-parser qwen3 --tool-call-parser qwen3_coder --chunked-prefill-size 8192 --max-running-requests 220 --cuda-graph-max-bs-decode 224" ;;
   *)      SERVE_ARGS="--tp-size 4 --ep-size 4 --dtype bfloat16 --reasoning-parser qwen3 --tool-call-parser qwen3_coder --chunked-prefill-size 4096 --disable-radix-cache --max-running-requests 96 --cuda-graph-max-bs-decode 96 --disable-prefill-cuda-graph --mem-fraction-static ${FN_MF:-0.92}"
+          # 11-13 19:35: custom all-reduce failed CUDA-graph capture on A100 PCIe (no NVLink; custom_all_reduce.cuh:614) -> NCCL AR there
+          nvidia-smi topo -m | grep -qE "NV[0-9]+" || SERVE_ARGS="$SERVE_ARGS --disable-custom-all-reduce"
           export APPTAINERENV_PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True ;;
 esac
 source $B0/local_weights.sh; local_weights "$MODEL" || return 1
