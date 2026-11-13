@@ -11,7 +11,7 @@
 SLUG=medagentpro-qwen3.8-flash-next; source /fs04/scratch2/ub62/ssim0070/benchmark_runs/agents/mp_hosts.sh
 B=$HB; D=$B/dx/$SLUG; LOG=$D/logs/fn_supervisor3.log; mkdir -p $D/servers $D/logs
 R=/fs04/scratch2/ub62/ssim0070/DermArena_release/DermArena_v1/tasks
-TH11=${FN_TH11:-140}; TH12=${FN_TH12:-96}
+TH11=${FN_TH11:-140}; TH12=${FN_TH12:-112}   # 11-14: 112 > cap 96 so one runner keeps its server full (cases spend time in tools)
 export DX_ALLOW_META_CHANGE=1
 exec 7>$D/logs/fn_supervisor3.flock; flock -n 7 || { echo "another fn supervisor3 holds the lock"; exit 0; }
 log() { echo "$(date '+%m-%d %H:%M') [fn3] $*" | tee -a $LOG; }
@@ -76,11 +76,16 @@ while [ ! -f $D/FN_SUP3_STOP ]; do
   for r in $want; do
     if [ $r = t11 ]; then tgt=$first
     else  # T1.2: while T1.1 runs, only on a server without the t11 runner
-      t11srv=$(srv_of t11); tgt=""
+      # 11-14: choose the eligible server with the FEWEST runners (was: the first one), so a replacement runner never doubles up on
+      # one server while another (e.g. a new H200) has none.
+      t11srv=$(srv_of t11); tgt=""; bn=99
       for u in $servers; do
         if [ $l11 -gt 0 ] && { [ "$u" = "$t11srv" ] || { [ -z "$t11srv" ] && [ "$u" = "$first" ]; }; }; then continue; fi
-        tgt=$u; break
+        n=$(echo "$run" | awk -v u="$u" '$4==u' | grep -c .); [ $n -lt $bn ] && { bn=$n; tgt=$u; }
       done
+      # 11-14: at most ONE T1.2 runner per server (tool slots are scarce: the A40 holds 2). Two runners on one cap-96 server only
+      # queue, and would leave the next server (fit 4xA100, H200) without a runner until a slot frees.
+      [ -n "$tgt" ] && [ $bn -gt 0 ] && { log "$r waits: every live server already has a runner (one per server)"; continue; }
       [ -z "$tgt" ] && { log "$r waits: T1.1 still running ($l11 left) and no second server"; continue; }
     fi
     sl=$(slot); [ -z "$sl" ] && { log "$r: no free tools GPU"; break; }
