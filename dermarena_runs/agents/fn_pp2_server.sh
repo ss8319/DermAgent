@@ -22,6 +22,8 @@ while [ ! -f $STOP ]; do
   w0=$(grep -c LOCAL_WEIGHTS_OK $FND/logs/pp2_weights_$J0.log 2>/dev/null); w1=$(grep -c LOCAL_WEIGHTS_OK $FND/logs/pp2_weights_$J1.log 2>/dev/null)
   q=$(ls $B/holders/gpu2a100b/queue/*.req 2>/dev/null | wc -l)
   if [ "${w0:-0}" -ge 1 ] && [ "${w1:-0}" -ge 1 ] && [ $q -eq 0 ] && gpus_free $J0 && gpus_free $J1; then break; fi
+  # 11-14: never wait silently (T1.2 relaunch waited 68 min on a judge server nobody stopped): alert every 15 min of waiting
+  W=$(( ${W:-0} + 1 )); [ $(( W % 8 )) -eq 0 ] && echo "$(date '+%m-%d %H:%M') FN-PP2 still waiting $((W*2)) min (weights $w0/$w1, gpu2a100b queue $q, GPUs busy?)" >> $B/logs/gpu_watchdog/alerts.log
   sleep 120
 done
 [ -f $STOP ] && { log "STOP before launch"; exit 0; }
@@ -35,7 +37,7 @@ for rank in 1 0; do
       --env FLASHINFER_WORKSPACE_DIR=$CH/.cache/flashinfer --env TRITON_CACHE_DIR=$CH/.triton --env TORCH_HOME=$CH/.cache/torch \
       --env NCCL_IB_DISABLE=1 --env NCCL_SOCKET_IFNAME=bond0.114 --env GLOO_SOCKET_IFNAME=bond0.114 --env PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
       $C python3 -m sglang.launch_server --model-path /tmp/bench_weights/Qwen/Qwen3.8-Flash-Next --host 0.0.0.0 --port $PORT \
-      --trust-remote-code --node-rank $rank $ARGS" > $FND/logs/fn_pp2_rank$rank.log 2>&1 < /dev/null &
+      --trust-remote-code --node-rank $rank $ARGS" >> $FND/logs/fn_pp2_rank$rank.log 2>&1 < /dev/null &
   disown; sleep 20
 done
 ok=0; for i in $(seq 1 90); do curl -sf -m 10 ${URL%/v1}/health >/dev/null && { ok=1; break; }; [ -f $STOP ] && break; sleep 40; done
