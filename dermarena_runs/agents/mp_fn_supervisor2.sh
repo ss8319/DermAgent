@@ -65,7 +65,9 @@ while [ ! -f $D/FN_SUP2_STOP ]; do
   if [ -z "$servers" ]; then log "no live Flash-Next server ($left cases left [${rem[*]}], $nrun runners)"; [ -n "$DRY" ] && break; sleep 300; continue; fi
   cnt() { echo "$run" | awk -v u=$1 '$5==u' | grep -c .; }
   hi=""; hn=0; lo=""; ln=99; for u in $servers; do n=$(cnt $u); [ $n -gt $hn ] && { hn=$n; hi=$u; }; [ $n -lt $ln ] && { ln=$n; lo=$u; }; done
-  if [ $hn -ge 2 ] && [ $ln -eq 0 ] && [ "$hi" != "$lo" ]; then
+  # 11-13 19:00: rebalance OFF by default (FN_REBALANCE=1 to enable): moving a runner kills its in-flight cases, which near the end of
+  # T1.1 are 8+ h of work each. A new server gets new work instead (see fn_t11_finisher.sh / T1.2 runners).
+  if [ "${FN_REBALANCE:-0}" = 1 ] && [ $hn -ge 2 ] && [ $ln -eq 0 ] && [ "$hi" != "$lo" ]; then
     set -- $(echo "$run" | awk -v u=$hi '$5==u' | tail -1)
     log "rebalance: $hi has $hn runners, $lo has none: stopping shard $3 (host $1 pgid $2) to restart it on $lo"
     [ -z "$DRY" ] && srun --jobid=$1 --overlap -n1 -c1 --mem=1G bash -c "kill -TERM -- -$2" 2>/dev/null

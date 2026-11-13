@@ -41,11 +41,15 @@ run() {
   esac
   echo "$URL" > $FND/servers/$J.url.tmp; echo "$ARGS" > $FND/servers/$J.args; mv $FND/servers/$J.url.tmp $FND/servers/$J.url
   hist serving; echo "[fn-v2] $(date '+%m-%d %H:%M') registered $URL for mp_fn_supervisor2"
+  # 11-13 (owner goal "finish T1.1 first"): if the holder queue has HOLD_T11_ONLY and this is the 10_ request, release the server
+  # as soon as every T1.1 case is done, so the next request (12_judge_fn_t11.req) judges T1.1, then 13_ resumes Flash-Next for T1.2.
+  local T11=0; [ -f $Q/HOLD_T11_ONLY ] && [[ "$(basename "$req")" == 10_* ]] && T11=1
+  [ $T11 = 1 ] && echo "[fn-v2] HOLD_T11_ONLY: this server releases when T1.1 is complete"
   while [ ! -f $FND/servers/HOLD_STOP ]; do
-    left=$(python3 - "$FND" <<'PY'
+    left=$(python3 - "$FND" $T11 <<'PY'
 import json,glob,sys
 D=sys.argv[1]; R="/fs04/scratch2/ub62/ssim0070/DermArena_release/DermArena_v1/tasks"; n=0
-for t,d in (("T1.1","T1.1_disease_screening"),("T1.2","T1.2_disease_confirmation")):
+for t,d in (("T1.1","T1.1_disease_screening"),("T1.2","T1.2_disease_confirmation"))[:1 if sys.argv[2:3]==["1"] else 2]:
     done=set()
     for f in glob.glob(f"{D}/{t}/predictions.p*.jsonl"):
         for l in open(f):
@@ -58,5 +62,5 @@ PY
     [ "${left:-1}" = 0 ] && break
     sleep 600
   done
-  rm -f $FND/servers/$J.url; hist released; echo "[fn-v2] $(date '+%m-%d %H:%M') Flash-Next done (or HOLD_STOP): release"
+  rm -f $FND/servers/$J.url; hist released$([ $T11 = 1 ] && echo _T11_done); echo "[fn-v2] $(date '+%m-%d %H:%M') Flash-Next done (T1.1-only=$T11, or HOLD_STOP): release"
 }

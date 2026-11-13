@@ -1,0 +1,67 @@
+# 13 (11-13): same as 10_fn_server_v2.req, queued after 12_judge_fn_t11.req: resumes Flash-Next (now T1.2) once T1.1 is judged.
+# 10 (11-13, owner GO "run with best plan"): Flash-Next SERVER for MedAgent-Pro on ANY 4-GPU holder (H200, A100-80G or H100).
+# - H200: the 11-13 settings (cap 220, owner OK). A100/H100 (80 GB): prefix cache off (1 mamba slot per request instead of 5), cap 96,
+#   prefill CUDA graph off, mem-fraction 0.92 (FN_MF), expandable segments. Same model, weights, bf16, fp32 mamba state, sampling.
+#   Memory arithmetic + options: diagnostics/flashnext_no_h200_20261113/NOTES.md. Scheduling/memory flags only (sglang/CLAUDE.md Rule 8).
+# - A100/H100 must first PASS tools/fn_refcheck.py against the H200 reference (20 prompts: teacher-forced logprobs + greedy text),
+#   because A100 is not on the model's supported list. FAIL -> no runner ever uses this server; it stops (watchdog releases the job).
+# - PASS (or H200) -> registers dx/<slug>/servers/<job>.url + <job>.args (the runner's MP_SERVER_ARGS -> run_sig, so every case
+#   records which server config produced it) and holds until every Flash-Next case is done or servers/HOLD_STOP.
+# - Runners are started by agents/mp_fn_supervisor2.sh (tools on the A40 / spare A100), never on this node.
+# - 11_fn_server_v2_mf090.req retries with mem-fraction 0.90 only if THIS request failed to START (not after a refcheck FAIL).
+B0=/fs04/scratch2/ub62/ssim0070/benchmark_runs; FND=$B0/dx/medagentpro-qwen3.8-flash-next
+GPU=$(nvidia-smi --query-gpu=name --format=csv,noheader | head -1)
+MODEL=Qwen/Qwen3.8-Flash-Next; CTX=81920
+case "$GPU" in
+  *H200*) SERVE_ARGS="--tp-size 4 --ep-size 4 --dtype bfloat16 --reasoning-parser qwen3 --tool-call-parser qwen3_coder --chunked-prefill-size 8192 --max-running-requests 220 --cuda-graph-max-bs-decode 224" ;;
+  *)      SERVE_ARGS="--tp-size 4 --ep-size 4 --dtype bfloat16 --reasoning-parser qwen3 --tool-call-parser qwen3_coder --chunked-prefill-size 4096 --disable-radix-cache --max-running-requests 96 --cuda-graph-max-bs-decode 96 --disable-prefill-cuda-graph --mem-fraction-static ${FN_MF:-0.92}"
+          export APPTAINERENV_PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True ;;
+esac
+source $B0/local_weights.sh; local_weights "$MODEL" || return 1
+export SGLANG_CONTAINER=/fs04/scratch2/ub62/ssim0070/sglang/containers/sglang_v0522.sif
+export CONTAINER_HOME=/fs04/scratch2/ub62/ssim0070/sglang/.container_home_v0522
+mkdir -p $CONTAINER_HOME/.cache/flashinfer $CONTAINER_HOME/.cache/torch $CONTAINER_HOME/.triton
+[ -s "$SGLANG_CONTAINER" ] || { echo "missing $SGLANG_CONTAINER"; return 1; }
+[ "$MODEL|${CTX:-65536}|${SERVE_ARGS:-}" != "${CUR:-}" ] && bash $B0/clean_gpu.sh
+run() {
+  local URL=${OPENROUTER_BASE_URL/127.0.0.1/$(hostname)} J=$SLURM_JOB_ID left rc
+  local ARGS="$(echo "$SERVE_ARGS" | sed 's/  */ /g') --context-length $CTX"
+  mkdir -p $FND/servers
+  hist() { printf "%s\t%s\t%s\t%s\t%s\t%s\n" "$(date '+%F %T')" $J $(hostname) "$GPU" "$1" "$ARGS" >> $FND/servers/history.tsv; }
+  echo "[fn-v2] $(date '+%m-%d %H:%M') server up on $(hostname) ($GPU): $URL"
+  grep -E "max_running_requests|avail mem|capped|KV Cache is allocated|Mamba Cache is allocated" $OUT/server_${J}.log | tail -8
+  case "$GPU" in *H200*) ;; *)
+    hist refcheck_start
+    python3 $B0/tools/fn_refcheck.py compare "$URL" $B0/diagnostics/flashnext_no_h200_20261113/refcheck; rc=$?
+    if [ $rc -ne 0 ]; then
+      touch $FND/servers/REFCHECK_FAILED_$J; hist "refcheck_FAIL_rc$rc"
+      echo "$(date '+%m-%d %H:%M') FN-REFCHECK FAIL $J $(hostname) ($GPU) rc=$rc: server NOT used; see diagnostics/flashnext_no_h200_20261113/refcheck" >> $B0/logs/gpu_watchdog/alerts.log
+      return 1
+    fi
+    hist refcheck_PASS ;;
+  esac
+  echo "$URL" > $FND/servers/$J.url.tmp; echo "$ARGS" > $FND/servers/$J.args; mv $FND/servers/$J.url.tmp $FND/servers/$J.url
+  hist serving; echo "[fn-v2] $(date '+%m-%d %H:%M') registered $URL for mp_fn_supervisor2"
+  # 11-13 (owner goal "finish T1.1 first"): if the holder queue has HOLD_T11_ONLY and this is the 10_ request, release the server
+  # as soon as every T1.1 case is done, so the next request (12_judge_fn_t11.req) judges T1.1, then 13_ resumes Flash-Next for T1.2.
+  local T11=0; [ -f $Q/HOLD_T11_ONLY ] && [[ "$(basename "$req")" == 10_* ]] && T11=1
+  [ $T11 = 1 ] && echo "[fn-v2] HOLD_T11_ONLY: this server releases when T1.1 is complete"
+  while [ ! -f $FND/servers/HOLD_STOP ]; do
+    left=$(python3 - "$FND" $T11 <<'PY'
+import json,glob,sys
+D=sys.argv[1]; R="/fs04/scratch2/ub62/ssim0070/DermArena_release/DermArena_v1/tasks"; n=0
+for t,d in (("T1.1","T1.1_disease_screening"),("T1.2","T1.2_disease_confirmation"))[:1 if sys.argv[2:3]==["1"] else 2]:
+    done=set()
+    for f in glob.glob(f"{D}/{t}/predictions.p*.jsonl"):
+        for l in open(f):
+            try: done.add(json.loads(l)["_id"])
+            except Exception: pass
+    n+=sum(1 for l in open(f"{R}/{d}/test.jsonl") if l.strip() and json.loads(l)["_id"] not in done)
+print(n)
+PY
+)
+    [ "${left:-1}" = 0 ] && break
+    sleep 600
+  done
+  rm -f $FND/servers/$J.url; hist released$([ $T11 = 1 ] && echo _T11_done); echo "[fn-v2] $(date '+%m-%d %H:%M') Flash-Next done (T1.1-only=$T11, or HOLD_STOP): release"
+}

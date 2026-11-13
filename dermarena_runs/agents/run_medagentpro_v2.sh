@@ -101,13 +101,14 @@ fi
 GATE=""; [ "$MODE" = canary ] && GATE=--gate
 REV=""; [ "$MODE" != canary ] && REV=--require-reviewed     # the runner knows the namespace: <cache>/<namespace>/REVIEWED
 
+# 11-13: MP_TASKS=T1.1 or T1.2 runs one task only; MP_LOG_TAG keeps its log separate
 pids=()
 for ((p=0; p<NPROC; p++)); do
-  if [ "$MODE" = service ]; then TARGS=(--service "$JD"); else TARGS=(--tasks T1.1,T1.2 --input-tmpl "$IN" --out-tmpl "$OUT"); fi
+  if [ "$MODE" = service ]; then TARGS=(--service "$JD"); else TARGS=(--tasks ${MP_TASKS:-T1.1,T1.2} --input-tmpl "$IN" --out-tmpl "$OUT"); fi
   # two server groups share one run (11-08: H100 + A100): MP_SHARD_BASE = first global shard of this group, MP_SHARD_TOTAL = shards of
   # all groups together; case i belongs to shard i % TOTAL; outputs (predictions.p<shard>) and logs never collide, merge reads them all
   SH=$(( ${MP_SHARD_BASE:-0} + p )); TOT=${MP_SHARD_TOTAL:-$NPROC}
-  CUDA_VISIBLE_DEVICES=${GPUS[$p]} $RUN $REV "${TARGS[@]}" --shard $SH/$TOT --threads $THREADS >> $LOG/${MODE}_p$SH.log 2>&1 &
+  CUDA_VISIBLE_DEVICES=${GPUS[$p]} $RUN $REV "${TARGS[@]}" --shard $SH/$TOT --threads $THREADS >> $LOG/${MODE}${MP_LOG_TAG:-}_p$SH.log 2>&1 &
   pids+=($!)
   sleep 10   # stagger tool loading
 done
