@@ -7,5 +7,6 @@ if [ -f $Q/failed/10_fn_server_v2.req ] && [ ! -f $B0/dx/medagentpro-qwen3.8-fla
   FN_MF=0.88; source $B0/agents/medagentpro_reqs/10_fn_server_v2.req
 else
   echo "[fn-v2] 11: nothing to retry (10 did not fail to start, or refcheck failed): stop the server"
+  bash $B0/clean_gpu.sh   # 11-14: a failed __tools_host__ start does NOT stop the previous server (judge kept GPUs 68 min on 11-14)
   MODEL=__tools_host__; CTX=1024; SERVE_ARGS=""; run() { :; }
 fi
