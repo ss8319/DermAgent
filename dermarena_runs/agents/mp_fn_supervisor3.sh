@@ -13,7 +13,7 @@ B=$HB; D=$B/dx/$SLUG; LOG=$D/logs/fn_supervisor3.log; mkdir -p $D/servers $D/log
 R=/fs04/scratch2/ub62/ssim0070/DermArena_release/DermArena_v1/tasks
 TH11=${FN_TH11:-140}; TH12=${FN_TH12:-112}   # 11-14: 112 > cap 96 so one runner keeps its server full (cases spend time in tools)
 export DX_ALLOW_META_CHANGE=1
-exec 7>$D/logs/fn_supervisor3.flock; flock -n 7 || { echo "another fn supervisor3 holds the lock"; exit 0; }
+exec 7>$D/logs/fn_supervisor3.flock; flock -n 7 || { echo "$(date '+%m-%d %H:%M') [fn3] another process holds the supervisor lock (a runner started by an old supervisor?): exit" | tee -a $LOG; exit 0; }
 log() { echo "$(date '+%m-%d %H:%M') [fn3] $*" | tee -a $LOG; }
 left() { python3 - "$D" "$R" <<'PY'
 import json,glob,sys
@@ -24,7 +24,9 @@ for t,d in (("T1.1","T1.1_disease_screening"),("T1.2","T1.2_disease_confirmation
         for l in open(f):
             try: done.add(json.loads(l)["_id"])
             except Exception: pass
-    out.append(sum(1 for l in open(f"{R}/{d}/test.jsonl") if l.strip() and json.loads(l)["_id"] not in done))
+    ids=[json.loads(l)["_id"] for l in open(f"{R}/{d}/test.jsonl") if l.strip()]
+    out.append(sum(1 for x in ids if x not in done))
+    if t == "T1.2": out += [sum(1 for i, x in enumerate(ids) if i % 2 == k and x not in done) for k in (0, 1)]
 print(*out)
 PY
 }
@@ -52,19 +54,24 @@ slot() {  # first "host gpu" that can take one more runner (free >= 21000 MiB an
 launch() {  # $1 role  $2 server url  $3 host  $4 gpu
   local SA tasks sh th; SA=$(args_of "$2")
   case $1 in t11) tasks=T1.1; sh="0 1"; th=$TH11;; t12_s0) tasks=T1.2; sh="0 2"; th=$TH12;; t12_s1) tasks=T1.2; sh="1 2"; th=$TH12;; esac
+  local cap; cap=$(echo "$SA" | grep -oE -- '--max-running-requests [0-9]+' | grep -oE '[0-9]+$')   # 11-14 review: 112 threads used half an H200
+  [ -n "$cap" ] && [ $1 != t11 ] && th=$((cap + 16))
   set -- $1 $2 $3 $4 $sh
   log "start $1 on $2 ($th threads), tools on host $3 GPU $4, server args: $SA"
   [ -n "$DRY" ] && return 0
   setsid nohup env MP_REMOTE_CPUS=8 MP_REMOTE_MEM=24G bash $B/tools/guarded.sh "${2%/v1}/health" bash $B/agents/run_medagentpro_remote_v2.sh $3 "$2" full \
     MP_SLUG=$SLUG MP_BACKBONE=Qwen/Qwen3.8-Flash-Next "MP_TOOL_GPUS='$4'" MP_NPROC=1 MP_THREADS=$th MP_SHARD_BASE=$5 MP_SHARD_TOTAL=$6 \
-    MP_TASKS=$tasks MP_LOG_TAG=_$1 MP_ALLOC_CONF=expandable_segments:True DX_ALLOW_META_CHANGE=1 "MP_SERVER_ARGS='$SA'" >> $D/logs/fnsup3_$1.out 2>&1 < /dev/null &
+    MP_TASKS=$tasks MP_LOG_TAG=_$1 MP_ALLOC_CONF=expandable_segments:True DX_ALLOW_META_CHANGE=1 "MP_SERVER_ARGS='$SA'" >> $D/logs/fnsup3_$1.out 2>&1 < /dev/null 7>&- &
   disown
 }
 log "fn supervisor3 start (pid $$, DRY=${DRY:-0}, t11 threads $TH11, t12 threads $TH12)"
 while [ ! -f $D/FN_SUP3_STOP ]; do
   run=$(runners) || { log "cannot inspect a tools host: skip pass"; sleep 300 7>&-; continue; }
-  set -- $(left); l11=$1; l12=$2
+  set -- $(left); l11=$1; l12=$2; l12s0=$3; l12s1=$4
   servers=$(fn_servers)
+  if [ "$l12" != "${LAST12:-}" ]; then LAST12=$l12; LASTCH=$(date +%s); fi
+  if [ -n "$(echo "$run" | grep .)" ] && [ $(( $(date +%s) - ${LASTCH:-$(date +%s)} )) -gt 43200 ] && [ $(( $(date +%s) - ${LASTAL:-0} )) -gt 21600 ]; then
+    LASTAL=$(date +%s); echo "$(date '+%m-%d %H:%M') FN-T1.2 NO PROGRESS for 12 h ($l12 left, runners alive): check full_t12_s*_p0.log" >> $B/logs/gpu_watchdog/alerts.log; fi
   [ $l11 -eq 0 ] && [ $l12 -eq 0 ] && [ -z "$(echo "$run" | grep .)" ] && { log "all cases finished: supervisor3 exits"; break; }
   if [ -z "$servers" ]; then log "no live Flash-Next server (T1.1 left $l11, T1.2 left $l12)"; [ -n "$DRY" ] && break; sleep 300 7>&-; continue; fi
   has() { echo "$run" | awk -v r=$1 '$3==r' | grep -q .; }
@@ -72,7 +79,7 @@ while [ ! -f $D/FN_SUP3_STOP ]; do
   first=$(echo "$servers" | head -1)
   want=""
   [ $l11 -gt 0 ] && ! has t11 && want="t11"
-  for r in t12_s0 t12_s1; do [ $l12 -gt 0 ] && ! has $r && want="$want $r"; done
+  for r in t12_s0 t12_s1; do k=${r#t12_s}; lk=$([ $k = 0 ] && echo ${l12s0:-$l12} || echo ${l12s1:-$l12}); [ "$lk" -gt 0 ] && ! has $r && want="$want $r"; done
   for r in $want; do
     if [ $r = t11 ]; then tgt=$first
     else  # T1.2: while T1.1 runs, only on a server without the t11 runner

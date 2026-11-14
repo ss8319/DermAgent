@@ -9,6 +9,21 @@ B0=/fs04/scratch2/ub62/ssim0070/benchmark_runs
 source $B0/local_weights.sh; local_weights "$MODEL" || return 1
 [ "$MODEL|${CTX:-65536}|${SERVE_ARGS:-}" != "${CUR:-}" ] && bash $B0/clean_gpu.sh
 run() {
+  # 11-14 review: judge ONLY when every Flash-Next case has a prediction (10_ can end early: refcheck FAIL, start failure, HOLD_STOP)
+  local nleft; nleft=$(python3 - <<'PY2'
+import json,glob
+D="/fs04/scratch2/ub62/ssim0070/benchmark_runs/dx/medagentpro-qwen3.8-flash-next"; R="/fs04/scratch2/ub62/ssim0070/DermArena_release/DermArena_v1/tasks"; n=0
+for t,d in (("T1.1","T1.1_disease_screening"),("T1.2","T1.2_disease_confirmation")):
+    done=set()
+    for f in glob.glob(f"{D}/{t}/predictions.p*.jsonl"):
+        for l in open(f):
+            try: done.add(json.loads(l)["_id"])
+            except Exception: pass
+    n+=sum(1 for l in open(f"{R}/{d}/test.jsonl") if l.strip() and json.loads(l)["_id"] not in done)
+print(n)
+PY2
+)
+  if [ "${nleft:-1}" != 0 ]; then echo "$(date '+%m-%d %H:%M') FN final judge SKIPPED on $SLURM_JOB_ID: ${nleft} Flash-Next cases still without a prediction" >> $B0/logs/gpu_watchdog/alerts.log; return 1; fi
   local D=$B0/dx/medagentpro-qwen3.8-flash-next
     python3 - $D <<'PY' || return 1
 import json, os, sys

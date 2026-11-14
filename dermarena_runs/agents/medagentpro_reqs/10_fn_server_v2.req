@@ -33,7 +33,10 @@ run() {
   grep -E "max_running_requests|avail mem|capped|KV Cache is allocated|Mamba Cache is allocated" $OUT/server_${J}.log | tail -8
   case "$GPU" in *H200*) ;; *)
     hist refcheck_start
-    python3 $B0/tools/fn_refcheck.py compare "$URL" $B0/diagnostics/flashnext_no_h200_20261113/refcheck; rc=$?
+    for a in 1 2 3; do   # 11-14 review: rc 2 = could not run (e.g. a transient HTTP error): retry, do not drop a good server
+      python3 $B0/tools/fn_refcheck.py compare "$URL" $B0/diagnostics/flashnext_no_h200_20261113/refcheck; rc=$?
+      [ $rc -ne 2 ] && break; echo "[fn-v2] refcheck could not run (attempt $a), retrying in 2 min"; sleep 120
+    done
     # 11-13 21:05: rc 3 = PASS_NOISE_CAP (only the per-prompt cap exceeded, worst < 0.5); accepted while the owner-OK'd override exists
     [ $rc -eq 3 ] && [ -f $FND/servers/A100_REFCHECK_OVERRIDE ] && { hist refcheck_PASS_NOISE_CAP_override; rc=0; }
     if [ $rc -ne 0 ]; then
