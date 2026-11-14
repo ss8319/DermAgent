@@ -1511,7 +1511,7 @@ def run_task(ctx, task, out_dir, todo, k, threads):
 
     for p in (1, 2):
         if p == 2:
-            have = v1.done_ids(out_dir)
+            have = v1.done_ids(out_dir, ctx["run_sig"])
             todo = [r for r in todo if r["_id"] not in have]
             if not todo:
                 break
@@ -1724,7 +1724,7 @@ def main():
             out_dir.mkdir(parents=True, exist_ok=True)
             rows = [json.loads(l) for l in inp.open() if l.strip()]
             mine = [r for i, r in enumerate(rows) if i % n == k]
-            have = v1.done_ids(out_dir)
+            have = v1.done_ids(out_dir, run_sig)
             todo = [r for r in mine if r["_id"] not in have]
             if limit:
                 todo = todo[:limit]
@@ -1785,7 +1785,8 @@ def main():
     jd.mkdir(parents=True, exist_ok=True)
     print(f"[mp] SERVICE ready (shard {k}/{n}) — polling {jd}", flush=True)
     while not (jd / "STOP").exists():
-        jobs = [j for j in sorted(jd.glob("*.json")) if not (jd / f"{j.stem}.p{k}.done").exists()]
+        jobs = [j for j in sorted(jd.glob("*.json")) if not (jd / f"{j.stem}.p{k}.done").exists()
+                and not (jd / f"{j.stem}.p{k}.incomplete").exists()]
         if not jobs:
             time.sleep(30)
             continue
@@ -1803,9 +1804,21 @@ def main():
         for task, out_dir, todo in work:
             if todo and not (jd / "STOP").exists():
                 run_task(ctx, task, out_dir, todo, k, thr)
+        # .done only when every planned case has a row of this run_sig (a stop file or a case still dropped after pass 2
+        # would otherwise mark the job finished, and a restarted worker would never pick it up again)
+        left = {t: [r["_id"] for r in td if r["_id"] not in v1.done_ids(od, run_sig)] for t, od, td in work}
+        n_left = sum(len(v) for v in left.values())
+        if n_left and (jd / "STOP").exists():
+            continue  # worker stops; the job stays open for the next start
+        if n_left:
+            (jd / f"{jf.stem}.p{k}.incomplete").write_text(json.dumps({"time": v1.now(), "run_sig": run_sig, "missing": left}))
+            print(f"[mp] SERVICE job {jf.stem} shard {k}: {n_left} case(s) without a row -> {jf.stem}.p{k}.incomplete, "
+                  f"not .done (delete the marker to retry)", flush=True)
+            continue
         (jd / f"{jf.stem}.p{k}.done").write_text(v1.now())
         if k == 0:
-            while not all((jd / f"{jf.stem}.p{x}.done").exists() for x in range(n)) and not (jd / "STOP").exists():
+            fin = lambda x: (jd / f"{jf.stem}.p{x}.done").exists() or (jd / f"{jf.stem}.p{x}.incomplete").exists()  # noqa: E731
+            while not all(fin(x) for x in range(n)) and not (jd / "STOP").exists():
                 time.sleep(20)
             for task, out_dir, _ in work:
                 v1.merge(out_dir)
@@ -1814,7 +1827,10 @@ def main():
                 r2 = subprocess.run([sys.executable, str(HERE / "mp_postcheck.py"), str(out_dir), task], capture_output=True, text=True)
                 (out_dir / "POSTCHECK.txt").write_text(r.stdout + r.stderr + r2.stdout + r2.stderr)
                 print(f"[mp] SERVICE postcheck {jf.stem} {task}:\n{r.stdout[-1500:]}", flush=True)
-            (jd / f"{jf.stem}.ALLDONE").write_text(v1.now())
+            if all((jd / f"{jf.stem}.p{x}.done").exists() for x in range(n)):
+                (jd / f"{jf.stem}.ALLDONE").write_text(v1.now())
+            else:
+                print(f"[mp] SERVICE job {jf.stem}: not every shard is .done (stopped or .incomplete) — no ALLDONE", flush=True)
     print("[mp] SERVICE STOP seen — exiting", flush=True)
 
 
