@@ -55,12 +55,23 @@ run() {
   # 11-14 auto-fallback: the server is health-checked every 60 s while it holds. After 3 failures in a row it is DEAD: unregister,
   # mark DIED_<job> (11_ then does not retry), and queue a relaunch IN THIS ALLOCATION (10r<n>, sorts before 11_; at most 3; the
   # 2nd+ use mem-fraction 0.88 on 80 GB GPUs). Before this, a crashed server left run() sleeping forever and 4 GPUs idle.
-  local hf=0 it=0 n
+  # 11-14 review: markers are keyed by job AND requeue count (a requeued bdi job keeps its id), so a requeue starts fresh.
+  # RELEASE_<job> (written by mp_fn_supervisor3 when this server had no runner for 60 min and no role is waiting): stop holding,
+  # so the job empties and the watchdog releases it instead of 4 GPUs idling for days (M3 cancels idle GPU jobs).
+  local hf=0 it=0 n MK=${J}_${SLURM_RESTART_COUNT:-0}
+  rm -f $FND/servers/RELEASE_$J
   while [ ! -f $FND/servers/HOLD_STOP ]; do
+    if [ -f $FND/servers/RELEASE_$J ]; then
+      rm -f $FND/servers/RELEASE_$J; hist released_no_runner
+      echo "$(date '+%m-%d %H:%M') FN-SERVER $J $(hostname) ($GPU): no runner for 60 min and no role waiting: released (watchdog frees the job)" >> $B0/logs/gpu_watchdog/alerts.log
+      break
+    fi
     if curl -sf -m 30 http://127.0.0.1:$PORT/health >/dev/null; then hf=0; else hf=$((hf+1)); fi
     if [ $hf -ge 3 ]; then
-      rm -f $FND/servers/$J.url; touch $FND/servers/DIED_$J
-      n=$(( $(cat $FND/servers/relaunches_$J 2>/dev/null || echo 0) + 1 )); echo $n > $FND/servers/relaunches_$J; hist "DEAD_relaunch_$n"
+      rm -f $FND/servers/$J.url; touch $FND/servers/DIED_$MK
+      n=$(( $(cat $FND/servers/relaunches_$MK 2>/dev/null || echo 0) + 1 )); echo $n > $FND/servers/relaunches_$MK; hist "DEAD_relaunch_$n"
+      # 11-14 review: stop the (possibly wedged, not crashed) server now, so the relaunch always starts fresh and nothing hangs on it
+      kill $SP 2>/dev/null; bash $B0/clean_gpu.sh
       if [ $n -le 3 ]; then
         { [ $n -ge 2 ] && echo "FN_MF=0.88"; cat $B0/agents/medagentpro_reqs/10_fn_server_v2.req; } > $Q/10r${n}_fn_server_relaunch.req
         echo "$(date '+%m-%d %H:%M') FN-SERVER DIED $J $(hostname) ($GPU): relaunch $n/3 queued in the same allocation (see $OUT/server_${J}.log)" >> $B0/logs/gpu_watchdog/alerts.log

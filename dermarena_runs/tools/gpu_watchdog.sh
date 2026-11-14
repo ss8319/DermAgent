@@ -46,7 +46,8 @@ while [ ! -f $W/STOP ]; do
     # minutes since any GPU of this job was >= 5 %
     last_busy=$(awk -F'\t' '$4>=5{t=$1} END{print t+0}' $S/$j.tsv); first=$(head -1 $S/$j.tsv | cut -f1)
     [ "$last_busy" -eq 0 ] && last_busy=$first; idle=$(( (now - last_busy) / 60 ))
-    hold=${name#bench-}; q=$B/holders/$hold/queue; nq=$(ls $q/*.req 2>/dev/null | wc -l)
+    hold=${name#bench-}; [ -d $B/holders/$hold ] || hold=${hold//-/_}; q=$B/holders/$hold/queue;   # 11-14: bench-bdiimg-h200x4 -> bdiimg_h200x4
+    nq=$(ls $q/*.req 2>/dev/null | wc -l)
     th=20; tools_hosts | grep -qx $j && th=60
     note=""
     # R2: per-GPU average since watching began, once >= 3 h of samples
@@ -77,7 +78,13 @@ while [ ! -f $W/STOP ]; do
   # H: Flash-Next supervisor (11-14: watches mp_fn_supervisor3.sh, the live one; the old v1 rule was disabled by FN_SUPERVISOR_STOP
   # and would have relaunched the retired v1). Stop file: FN_SUP3_STOP.
   if [ ! -f $FN/FN_SUP3_STOP ]; then
-    if ! pgrep -f '[m]p_fn_supervisor3\.sh' >/dev/null 2>&1 && [ "$(fn_left)" -gt 0 ]; then
+    # 11-14 review: also relaunch a HUNG supervisor (alive but heartbeat > 30 min old, e.g. an srun that never returns)
+    hb=$FN/logs/fn_supervisor3.heartbeat
+    if pgrep -f '^bash \S*mp_fn_supervisor3\.sh$' >/dev/null 2>&1 && [ -f $hb ] && [ $(( $(date +%s) - $(stat -c %Y $hb) )) -gt 1800 ]; then
+      alert "H fn supervisor3 heartbeat $(( ($(date +%s) - $(stat -c %Y $hb)) / 60 )) min old: killing the hung supervisor"
+      [ -z "$DRY" ] && { for p in $(pgrep -f '^bash \S*mp_fn_supervisor3\.sh$'); do pkill -P $p 2>/dev/null; kill $p 2>/dev/null; done; sleep 5; }
+    fi
+    if ! pgrep -f '^bash \S*mp_fn_supervisor3\.sh$' >/dev/null 2>&1 && [ "$(fn_left)" -gt 0 ]; then
       alert "H fn supervisor3 not running (work left): relaunching detached on $(hostname)"
       [ -z "$DRY" ] && setsid nohup bash $B/agents/mp_fn_supervisor3.sh >> $FN/logs/fnsup3_supervisor.out 2>&1 < /dev/null 9>&- &
     fi

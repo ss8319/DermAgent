@@ -36,7 +36,7 @@ server_jobs() { local f; for f in $D/servers/*.url; do [ -f "$f" ] && basename $
 args_of() { local f; for f in $D/servers/*.url; do [ "$(cat $f 2>/dev/null)" = "$1" ] && cat "${f%.url}.args" && return; done; }
 runners() {  # "host pgid role url" for every Flash-Next runner on a live tools host; role = t11 | t12_s<k> | old (any other layout)
   local j; for j in $(live_hosts); do
-    srun --jobid=$j --overlap -n1 -c1 --mem=1G bash -c 'echo OK; for p in $(pgrep -f "[r]un_dermarena_v1_medagentpro.py"); do
+    timeout 120 srun --jobid=$j --overlap -n1 -c1 --mem=1G bash -c 'echo OK; for p in $(pgrep -f "[r]un_dermarena_v1_medagentpro.py"); do
         a=$(tr "\0" " " < /proc/$p/cmdline 2>/dev/null); echo "$a" | grep -qF "/medagentpro-qwen3.8-flash-next/" || continue
         t=$(echo "$a" | grep -oE -- "--tasks [^ ]+" | cut -d" " -f2); s=$(echo "$a" | grep -oE -- "--shard [0-9]+/[0-9]+" | cut -d" " -f2)
         u=$(tr "\0" "\n" < /proc/$p/environ 2>/dev/null | grep "^OPENROUTER_BASE_URL=" | cut -d= -f2-)
@@ -47,7 +47,7 @@ slot() {  # first "host gpu" that can take one more runner (free >= 21000 MiB an
   local j end sj=" $(server_jobs | tr '\n' ' ') "; for j in $(live_hosts); do
     case "$sj" in *" $j "*) continue;; esac
     end=$(date -d "$(squeue -h -j $j -o %e)" +%s 2>/dev/null || echo 0); [ $((end - $(date +%s))) -lt 10800 ] && continue
-    srun --jobid=$j --overlap -n1 -c1 --mem=1G bash -c 'nvidia-smi --query-gpu=index,memory.free,memory.total --format=csv,noheader,nounits | tr -d " "
+    timeout 120 srun --jobid=$j --overlap -n1 -c1 --mem=1G bash -c 'nvidia-smi --query-gpu=index,memory.free,memory.total --format=csv,noheader,nounits | tr -d " "
       echo "#"; for p in $(pgrep -f "[r]un_dermarena_v1_medagentpro.py"); do tr "\0" "\n" < /proc/$p/environ | grep "^CUDA_VISIBLE_DEVICES=" | cut -d= -f2; done' 2>/dev/null \
     | awk -v j=$j -F, '/^#/{m=1;next} !m{g[$1]=$2; t[$1]=$3; next} m{n[$1]++} END{for(i in g) if(g[i]>=21000 && n[i]+0 < int(t[i]/21000)) print j, i}' | head -1
   done | head -1; }
@@ -68,7 +68,9 @@ launch() {  # $1 role  $2 server url  $3 host  $4 gpu
 log "fn supervisor3 start (pid $$, DRY=${DRY:-0}, t11 threads $TH11, t12 threads $TH12)"
 while [ ! -f $D/FN_SUP3_STOP ]; do
   run=$(runners) || { log "cannot inspect a tools host: skip pass"; sleep 300 7>&-; continue; }
+  touch $D/logs/fn_supervisor3.heartbeat   # 11-14 review: the watchdog relaunches a supervisor whose heartbeat is > 30 min old (hung srun)
   set -- $(left); l11=$1; l12=$2; l12s0=$3; l12s1=$4
+  [ -z "$l12s1" ] && { log "case count failed: skip pass"; sleep 300 7>&-; continue; }
   servers=$(fn_servers)
   if [ "$l12" != "${LAST12:-}" ]; then LAST12=$l12; LASTCH=$(date +%s); fi
   if [ -n "$(echo "$run" | grep .)" ] && [ $(( $(date +%s) - ${LASTCH:-$(date +%s)} )) -gt 43200 ] && [ $(( $(date +%s) - ${LASTAL:-0} )) -gt 21600 ]; then
@@ -109,16 +111,32 @@ while [ ! -f $D/FN_SUP3_STOP ]; do
     big=""; bigc=0
     for u in $servers; do echo "$run" | awk -v u="$u" '$4==u' | grep -q . && continue; c=$(cap_of $u); [ $c -gt $bigc ] && { bigc=$c; big=$u; }; done
     if [ -n "$big" ]; then
-      vic=$(echo "$run" | awk '$3 ~ /^t12_s/ && $2 > 1' | while read h pg r u; do echo "$(cap_of $u) $h $pg $r $u"; done | sort -n | head -1)
+      vic=$(echo "$run" | awk '$3 ~ /^t12_s/ && $2 > 1' | while read h pg r u; do c=$(cap_of $u); [ $c -gt 0 ] && echo "$c $h $pg $r $u"; done | sort -n | head -1)
       if [ -n "$vic" ]; then set -- $vic
-        if [ "$1" -gt 0 ] && [ $bigc -ge $(( 2 * $1 )) ] && [ -z "$(slot)" ]; then
+        # 11-14 review: only while the victim's shard has >= 3x its server cap left (a tail runner is not capacity-bound, and
+        # killing it would throw away up to ~100 in-flight multi-hour cases for nothing)
+        vl=$([ "$4" = t12_s0 ] && echo $l12s0 || echo $l12s1)
+        if [ "$1" -gt 0 ] && [ $bigc -ge $(( 2 * $1 )) ] && [ $vl -ge $(( 3 * $1 )) ] && [ -z "$(slot)" ]; then
           log "UPGRADE: stop $4 on $5 (cap $1, host $2 pgid $3) so the next pass moves it to $big (cap $bigc, no runner)"
           echo "$(date '+%m-%d %H:%M') FN-UPGRADE moving $4 from $5 (cap $1) to $big (cap $bigc)" >> $B/logs/gpu_watchdog/alerts.log
-          [ -z "$DRY" ] && srun --jobid=$2 --overlap -n1 -c1 --mem=1G kill -TERM -- -$3 2>/dev/null
+          [ -z "$DRY" ] && timeout 120 srun --jobid=$2 --overlap -n1 -c1 --mem=1G kill -TERM -- -$3 2>/dev/null
         fi
       fi
     fi
   fi
+  # 11-14 review: a live server with NO runner for >= 60 min while no role is waiting (3rd server, the one an UPGRADE left, or a
+  # finished shard's server in the tail) -> RELEASE_<job>; its 10_ req stops holding and the watchdog frees the job (idle-GPU policy).
+  declare -A NR 2>/dev/null; now=$(date +%s)
+  for u in $servers; do
+    if echo "$run" | awk -v u="$u" '$4==u' | grep -q . || [ -n "$want" ]; then unset "NR[$u]"; continue; fi
+    [ -z "${NR[$u]:-}" ] && NR[$u]=$now
+    if [ $(( now - ${NR[$u]} )) -ge 3600 ]; then
+      for f in $D/servers/*.url; do [ "$(cat $f 2>/dev/null)" = "$u" ] || continue; jb=$(basename $f .url)
+        [ -f $D/servers/RELEASE_$jb ] && continue
+        log "RELEASE: server $u (job $jb) has had no runner for $(( (now - ${NR[$u]}) / 60 )) min and no role waits"
+        [ -z "$DRY" ] && touch $D/servers/RELEASE_$jb; done
+    fi
+  done
   [ -n "$DRY" ] && { log "DRY: one pass only"; break; }
   sleep 300 7>&-
 done
