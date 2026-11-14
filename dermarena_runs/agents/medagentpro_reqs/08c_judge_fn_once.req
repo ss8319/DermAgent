@@ -1,0 +1,4 @@
+# 08c (11-13 19:00, first-principles review): tonight's judge pass is SKIPPED so gpu2a100b is free at once for the 2-node Flash-Next
+# server (agents/fn_pp2_server.sh). All Flash-Next T1.1 cases are judged once at the end by agents/fn_t11_finisher.sh.
+# Original request kept as 08c_judge_fn_once.req.bak_1900. No-op: MODEL=__tools_host__ (start fails by design -> failed/), no server.
+MODEL=__tools_host__; CTX=1024; SERVE_ARGS=""; run() { :; }

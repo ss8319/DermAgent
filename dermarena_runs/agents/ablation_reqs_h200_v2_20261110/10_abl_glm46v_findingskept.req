@@ -1,0 +1,8 @@
+# 30 — FINDINGS-KEPT arm (claims 1 + 3a), GLM-4.6V, text only, image findings kept (labels/findings_kept, 2026-11-07). Owner chose option B 2026-11-07. Same serving as 100_ablation_glm46v_textonly (tp4, glm45 parser, 131k ctx) on 4x A100-80G. Queued in BOTH a100x4b and a100x4: lock.sh makes the second holder skip; whichever starts first runs it.
+MODEL=zai-org/GLM-4.6V
+SERVE_ARGS="--tp-size 4 --reasoning-parser glm45 --cuda-graph-max-bs 128"
+CTX=131072
+source /fs04/scratch2/ub62/ssim0070/benchmark_runs/lock.sh; skip_if_taken glm-4.6v-findingskept && return 0
+source /fs04/scratch2/ub62/ssim0070/benchmark_runs/local_weights.sh; local_weights "$MODEL" || return 1
+[ "$MODEL|${CTX:-65536}|${SERVE_ARGS:-}" != "${CUR:-}" ] && bash /fs04/scratch2/ub62/ssim0070/benchmark_runs/clean_gpu.sh
+run() { export DX_EXAMINEE_CONTEXT=131072; bash /fs04/scratch2/ub62/ssim0070/benchmark_runs/tools/guarded.sh "${OPENROUTER_BASE_URL%/v1}/health" bash /fs04/scratch2/ub62/ssim0070/benchmark_runs/dx/run_dx_model_findingskept.sh zai-org/GLM-4.6V glm-4.6v-findingskept 128; }

@@ -299,6 +299,9 @@ def main():
     print("\nInitializing tools and agent...")
     
     try:
+        # REPRO PATCH: Qwen3-VL is now wired into create_tools (qwen_vqa branch +
+        # qwen_model_id param), so the runner's existing qwen_model_id plumbing is
+        # restored.
         tools = create_tools(
             device=args.device,
             enabled_tools=enabled_tools,

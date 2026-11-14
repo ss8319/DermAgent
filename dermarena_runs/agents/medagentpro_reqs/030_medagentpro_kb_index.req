@@ -1,0 +1,13 @@
+# 030 — MedAgent-Pro knowledge base, GPU step: one-sentence summary per MedlinePlus document from Qwen3.5-27B (5,499 docs,
+# through mp_llm, full trace) + Qwen3-Embedding-8B over 59,681 chunks on GPU 2 + index manifest. Resumable: a rerun skips done
+# documents / shards. Same server settings as 010 (tp2 on GPUs 0-1), so 040/050 do not restart it.
+MODEL=Qwen/Qwen3.5-27B
+SERVE_ARGS="--tp-size 2 --reasoning-parser qwen3 --tool-call-parser qwen3_coder --mem-fraction-static 0.90 --cuda-graph-max-bs 64 --mamba-full-memory-ratio 2.0"
+CTX=131072
+source /fs04/scratch2/ub62/ssim0070/benchmark_runs/local_weights.sh; local_weights "$MODEL" || return 1
+[ "$MODEL|${CTX:-65536}|${SERVE_ARGS:-}" != "${CUR:-}" ] && bash /fs04/scratch2/ub62/ssim0070/benchmark_runs/clean_gpu.sh
+run() {
+  MP_SLUG=medagentpro-qwen3.5-27b MP_BACKBONE=Qwen/Qwen3.5-27B MP_TOOL_GPUS="2 3" MP_KB_WORKERS=48 \
+    bash /fs04/scratch2/ub62/ssim0070/benchmark_runs/tools/guarded.sh "${OPENROUTER_BASE_URL%/v1}/health" \
+    bash /fs04/scratch2/ub62/ssim0070/benchmark_runs/agents/run_medagentpro_v1.sh kb-index
+}

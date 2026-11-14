@@ -1,0 +1,49 @@
+# 14 (11-14, owner: 'setup so that it works auto'): FINAL judge pass over every Flash-Next case (T1.1 + T1.2) once T1.2 is complete.
+# Queued after 10_/11_ on every pending 4-GPU holder: 10_ releases its server only when every Flash-Next case has a prediction,
+# then 11_ (no-op, now frees the GPUs) and this request run. Same judge, args and merge as 12_judge_fn_t11.req (T1.1 judged 11-14).
+# A later holder reaching this finds nothing left to judge and finishes quickly.
+MODEL=Qwen/Qwen3.6-27B
+SERVE_ARGS="--dp-size 4 --reasoning-parser qwen3 --mem-fraction-static 0.90 --cuda-graph-max-bs 128 --mamba-full-memory-ratio 2.0"
+CTX=32768
+B0=/fs04/scratch2/ub62/ssim0070/benchmark_runs
+source $B0/local_weights.sh; local_weights "$MODEL" || return 1
+[ "$MODEL|${CTX:-65536}|${SERVE_ARGS:-}" != "${CUR:-}" ] && bash $B0/clean_gpu.sh
+run() {
+  # 11-14 review: judge ONLY when every Flash-Next case has a prediction (10_ can end early: refcheck FAIL, start failure, HOLD_STOP)
+  local nleft; nleft=$(python3 - <<'PY2'
+import json,glob
+D="/fs04/scratch2/ub62/ssim0070/benchmark_runs/dx/medagentpro-qwen3.8-flash-next"; R="/fs04/scratch2/ub62/ssim0070/DermArena_release/DermArena_v1/tasks"; n=0
+for t,d in (("T1.1","T1.1_disease_screening"),("T1.2","T1.2_disease_confirmation")):
+    done=set()
+    for f in glob.glob(f"{D}/{t}/predictions.p*.jsonl"):
+        for l in open(f):
+            try: done.add(json.loads(l)["_id"])
+            except Exception: pass
+    n+=sum(1 for l in open(f"{R}/{d}/test.jsonl") if l.strip() and json.loads(l)["_id"] not in done)
+print(n)
+PY2
+)
+  if [ "${nleft:-1}" != 0 ]; then echo "$(date '+%m-%d %H:%M') FN final judge SKIPPED on $SLURM_JOB_ID: ${nleft} Flash-Next cases still without a prediction" >> $B0/logs/gpu_watchdog/alerts.log; return 1; fi
+  local D=$B0/dx/medagentpro-qwen3.8-flash-next
+    python3 - $D <<'PY' || return 1
+import json, os, sys
+from pathlib import Path
+D = Path(sys.argv[1])
+for t in ("T1.1", "T1.2"):
+    d = D / t; rows = {}; sigs = set()
+    for f in sorted(d.glob("predictions.p*.jsonl")):
+        for l in open(f):
+            try: r = json.loads(l)
+            except Exception: continue
+            sigs.add(r.get("run_sig")); rows.setdefault(r["_id"], r)
+    if not rows: continue
+    print(f"[fn-judge12] {d}: run_sigs {sorted(map(str, sigs))} (documented in META_OVERRIDES.txt 2026-11-13: server config per case)")
+    tmp = d / f"predictions.jsonl.tmp{os.getpid()}"
+    with open(tmp, "w") as fo:
+        for r in rows.values(): fo.write(json.dumps(r, ensure_ascii=False) + "\n")
+    os.replace(tmp, d / "predictions.jsonl"); print(f"[fn-rolling] {d}: {len(rows)} rows")
+PY
+    echo "[fn-rolling] $(date '+%m-%d %H:%M') FINAL judge pass after T1.2 completed"
+    DX_JUDGE_WORKERS=64 DX_JUDGE_PASSES=1 bash $B0/tools/guarded.sh "${OPENROUTER_BASE_URL%/v1}/health" bash $B0/dx/judge_dx.sh medagentpro-qwen3.8-flash-next || return 1
+  return 0
+}

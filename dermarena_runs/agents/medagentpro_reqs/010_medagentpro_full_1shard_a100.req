@@ -1,0 +1,17 @@
+# 010 v2 (gpu2a100c / gpu2a100d, 11-09 17:45) — Qwen FULL: take ONE of the lagging shards 0 / 1 (whichever lock is free), 64 threads on this
+# server, tools on L40S GPU 2 (shard 0) / 3 (shard 1). mp_take_shard.sh first stops the runner that serves that shard now (an A100 "extra"
+# or a supervisor runner) by its exact process group. Replaces 010_medagentpro_full_s01_a100cd.req (shards 0+1 on one server = no speed-up).
+MODEL=Qwen/Qwen3.5-27B
+SERVE_ARGS="--tp-size 2 --reasoning-parser qwen3 --tool-call-parser qwen3_coder --mem-fraction-static 0.90 --cuda-graph-max-bs 64 --mamba-full-memory-ratio 2.0"
+CTX=131072
+source /fs04/scratch2/ub62/ssim0070/benchmark_runs/local_weights.sh; local_weights "$MODEL" || return 1
+[ "$MODEL|${CTX:-65536}|${SERVE_ARGS:-}" != "${CUR:-}" ] && bash /fs04/scratch2/ub62/ssim0070/benchmark_runs/clean_gpu.sh
+run() {
+  local B=/fs04/scratch2/ub62/ssim0070/benchmark_runs D=/fs04/scratch2/ub62/ssim0070/benchmark_runs/dx/medagentpro-qwen3.5-27b s=""
+  for x in 0 1; do NOWAIT=1 bash $B/agents/mp_shard_lock.sh $D/locks/shard$x $SLURM_JOB_ID && { s=$x; break; }; done
+  # both owned by running jobs -> surplus: return 3, the holder moves on to its ablation requests (they yield back, agents/mp_ablation_yield.sh)
+  [ -z "$s" ] && { echo "surplus: shard0 and shard1 owned by running jobs"; return 3; }
+  trap "[ \"\$(cat $D/locks/shard$s/owner 2>/dev/null)\" = \"$SLURM_JOB_ID\" ] && rm -rf $D/locks/shard$s" EXIT
+  local URL=${OPENROUTER_BASE_URL/127.0.0.1/$(hostname)}
+  bash $B/agents/mp_take_shard.sh $s "$URL" $((2 + s)) 64
+}

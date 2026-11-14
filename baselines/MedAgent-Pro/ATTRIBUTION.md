@@ -32,6 +32,11 @@ DermAgent paper (Table 1).
 | `Dermatology/tools/skin_tools.py` | New file by the DermAgent authors; dermatology tool wrappers |
 | `Dermatology/tools/__init__.py` | New file by the DermAgent authors |
 | `Dermatology/task*/task.json`, `toolset.json` | New configs by the DermAgent authors |
+| `mp_llm.py` | New (DermArena v1): one LLM-call helper for all modules (backbone, sampling, budget, trace) |
+| `Decider/OpenSet_Decider.py` | New (DermArena v1, old design): `MultiClass_Decider` made open-set; no longer used by the runner |
+| `medlineplus_kb.py`, `kb_rag.py`, `kb_index_build.py` | New (DermArena v1): MedlinePlus knowledge base and retrieval (paper Sec 3.2; `GUIDELINE_PROMPT` is upstream's `RAG.py` prompt; exception: one added line asking for a procedural guideline) |
+| `mp_postcheck.py` | New (DermArena v1): agent-specific post-check and canary gates |
+| `run_dermarena_v1_medagentpro.py`, `test_run_dermarena_v1_medagentpro.py` | New (DermArena v1): benchmark runner + CPU-only offline test |
 
 Each adapted file carries an attribution comment block at the top pointing to
 this document.

@@ -1,0 +1,34 @@
+# 12b (11-13): judge every finished Flash-Next case on gpu2a100b (dp2) once T1.1 is complete; queued by agents/fn_t11_finisher.sh.
+# 10_fn_server_v2.req released its Flash-Next server because T1.1 is complete (HOLD_T11_ONLY). ONE judge pass over every finished
+# Flash-Next case with the same judge as every run (Qwen3.6-27B, dp4 like 90_judge_all_ablation). Then 13_ resumes Flash-Next for T1.2.
+# Merge accepts the documented run_sigs (H200 cap 160 + the servers in servers/*.args; META_OVERRIDES.txt 2026-11-13) and logs counts.
+MODEL=Qwen/Qwen3.6-27B
+SERVE_ARGS="--dp-size 2 --reasoning-parser qwen3 --mem-fraction-static 0.90 --cuda-graph-max-bs 128 --mamba-full-memory-ratio 2.0"
+CTX=32768
+B0=/fs04/scratch2/ub62/ssim0070/benchmark_runs
+source $B0/local_weights.sh; local_weights "$MODEL" || return 1
+[ "$MODEL|${CTX:-65536}|${SERVE_ARGS:-}" != "${CUR:-}" ] && bash $B0/clean_gpu.sh
+run() {
+  local D=$B0/dx/medagentpro-qwen3.8-flash-next
+    python3 - $D <<'PY' || return 1
+import json, os, sys
+from pathlib import Path
+D = Path(sys.argv[1])
+for t in ("T1.1", "T1.2"):
+    d = D / t; rows = {}; sigs = set()
+    for f in sorted(d.glob("predictions.p*.jsonl")):
+        for l in open(f):
+            try: r = json.loads(l)
+            except Exception: continue
+            sigs.add(r.get("run_sig")); rows.setdefault(r["_id"], r)
+    if not rows: continue
+    print(f"[fn-judge12] {d}: run_sigs {sorted(map(str, sigs))} (documented in META_OVERRIDES.txt 2026-11-13: server config per case)")
+    tmp = d / f"predictions.jsonl.tmp{os.getpid()}"
+    with open(tmp, "w") as fo:
+        for r in rows.values(): fo.write(json.dumps(r, ensure_ascii=False) + "\n")
+    os.replace(tmp, d / "predictions.jsonl"); print(f"[fn-rolling] {d}: {len(rows)} rows")
+PY
+    echo "[fn-rolling] $(date '+%m-%d %H:%M') single judge pass after T1.1 completed (SCORE.txt PARTIAL)"
+    DX_JUDGE_WORKERS=64 DX_JUDGE_PASSES=1 bash $B0/tools/guarded.sh "${OPENROUTER_BASE_URL%/v1}/health" bash $B0/dx/judge_dx.sh medagentpro-qwen3.8-flash-next || return 1
+  return 0
+}

@@ -11,6 +11,7 @@
 import os
 import json
 from openai import OpenAI
+from mp_llm import mp_create  # DermArena v1: env-configurable backbone + full trace
 
 class Summary_Module:
     def __init__(self, api_key):
@@ -23,7 +24,9 @@ class Summary_Module:
         self.api_key = api_key
         self.client = OpenAI(api_key=self.api_key)
 
-    def summarize(self, input_file, output_file, prompt, field):
+    # DermArena v1 (2026-11-06): answer_suffix=None keeps the original hard-coded Yes/No suffix (tasks 1-3 unchanged);
+    # the DermArena runner passes SUMMARY_SUFFIX (the commented-out Yes, No or Uncertain line below).
+    def summarize(self, input_file, output_file, prompt, field, answer_suffix=None):
         """
         Summarize the content of a specified field in a JSON file using OpenAI ChatCompletion.
 
@@ -54,11 +57,10 @@ class Summary_Module:
             # {"role": "user", "content": f"{content}\n {prompt} \nAnswer with only one word (Yes, No or Uncertain)"}
             {"role": "user", "content": f"{content}\n {prompt} \nAnswer with only one word (Yes or No)"}
         ]
+        if answer_suffix is not None:
+            messages[1]["content"] = f"{content}\n {prompt} " + (f"\n{answer_suffix}" if answer_suffix else "")
 
-        completion = self.client.chat.completions.create(
-            model="chatgpt-4o-latest",
-            messages=messages
-        )
+        completion = mp_create(self.client, messages, model_default="gpt-4o", module="summary")
         summary_text = completion.choices[0].message.content
 
         output_data[field] = summary_text
