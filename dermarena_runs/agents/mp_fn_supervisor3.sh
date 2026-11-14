@@ -62,11 +62,11 @@ launch() {  # $1 role  $2 server url  $3 host  $4 gpu
 }
 log "fn supervisor3 start (pid $$, DRY=${DRY:-0}, t11 threads $TH11, t12 threads $TH12)"
 while [ ! -f $D/FN_SUP3_STOP ]; do
-  run=$(runners) || { log "cannot inspect a tools host: skip pass"; sleep 300; continue; }
+  run=$(runners) || { log "cannot inspect a tools host: skip pass"; sleep 300 7>&-; continue; }
   set -- $(left); l11=$1; l12=$2
   servers=$(fn_servers)
   [ $l11 -eq 0 ] && [ $l12 -eq 0 ] && [ -z "$(echo "$run" | grep .)" ] && { log "all cases finished: supervisor3 exits"; break; }
-  if [ -z "$servers" ]; then log "no live Flash-Next server (T1.1 left $l11, T1.2 left $l12)"; [ -n "$DRY" ] && break; sleep 300; continue; fi
+  if [ -z "$servers" ]; then log "no live Flash-Next server (T1.1 left $l11, T1.2 left $l12)"; [ -n "$DRY" ] && break; sleep 300 7>&-; continue; fi
   has() { echo "$run" | awk -v r=$1 '$3==r' | grep -q .; }
   srv_of() { echo "$run" | awk -v r=$1 '$3==r{print $4}' | head -1; }
   first=$(echo "$servers" | head -1)
@@ -90,9 +90,9 @@ while [ ! -f $D/FN_SUP3_STOP ]; do
     fi
     sl=$(slot); [ -z "$sl" ] && { log "$r: no free tools GPU"; break; }
     launch $r $tgt $sl
-    run="$run"$'\n'"${sl% *} 0 $r $tgt"; sleep 30
+    run="$run"$'\n'"${sl% *} 0 $r $tgt"; sleep 30 7>&-
   done
   [ -n "$DRY" ] && { log "DRY: one pass only"; break; }
-  sleep 300
+  sleep 300 7>&-
 done
 log "fn supervisor3 stop"
