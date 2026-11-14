@@ -50,7 +50,9 @@ case $MODE in
   service|kb-index|plan-probe) IN=""; OUT="" ;;
   *) echo "usage: $0 kb-ada|kb-index|canary|plans|plan-probe|rank-stability|full|service"; exit 2 ;;
 esac
-export MP_STOP_FILE=$B/dx/$SLUG/STOP_$MODE; rm -f $MP_STOP_FILE   # touch it -> workers skip remaining cases and exit
+# 11-15: MP_STOP_FILE_OVERRIDE = a per-server drain file (servers/DRAIN_<job>, set by mp_fn_supervisor3): the server's holder
+# touches it 3 h before walltime so this runner starts no new case and its in-flight cases can finish before the job ends.
+export MP_STOP_FILE=${MP_STOP_FILE_OVERRIDE:-$B/dx/$SLUG/STOP_$MODE}; rm -f $MP_STOP_FILE   # touch it -> workers skip remaining cases and exit
 
 export OPENAI_BASE_URL=${OPENROUTER_BASE_URL:?no server} OPENAI_API_KEY=local
 export HF_HOME=$HC HUGGINGFACE_HUB_CACHE=$HC/hub TRANSFORMERS_CACHE=$HC/hub HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1

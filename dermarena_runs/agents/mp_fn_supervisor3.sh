@@ -57,12 +57,13 @@ launch() {  # $1 role  $2 server url  $3 host  $4 gpu
   case $1 in t11) tasks=T1.1; sh="0 1"; th=$TH11;; t12_s0) tasks=T1.2; sh="0 2"; th=$TH12;; t12_s1) tasks=T1.2; sh="1 2"; th=$TH12;; esac
   local cap; cap=$(echo "$SA" | grep -oE -- '--max-running-requests [0-9]+' | grep -oE '[0-9]+$')   # 11-14 review: 112 threads used half an H200
   [ -n "$cap" ] && [ $1 != t11 ] && th=$((cap + 16))
+  local sj f; for f in $D/servers/*.url; do [ "$(cat $f 2>/dev/null)" = "$2" ] && sj=$(basename $f .url); done
   set -- $1 $2 $3 $4 $sh
-  log "start $1 on $2 ($th threads), tools on host $3 GPU $4, server args: $SA"
+  log "start $1 on $2 ($th threads), tools on host $3 GPU $4, drain file DRAIN_${sj:-none}, server args: $SA"
   [ -n "$DRY" ] && return 0
   setsid nohup env MP_REMOTE_CPUS=8 MP_REMOTE_MEM=24G bash $B/tools/guarded.sh "${2%/v1}/health" bash $B/agents/run_medagentpro_remote_v2.sh $3 "$2" full \
     MP_SLUG=$SLUG MP_BACKBONE=Qwen/Qwen3.8-Flash-Next "MP_TOOL_GPUS='$4'" MP_NPROC=1 MP_THREADS=$th MP_SHARD_BASE=$5 MP_SHARD_TOTAL=$6 \
-    MP_TASKS=$tasks MP_LOG_TAG=_$1 MP_ALLOC_CONF=expandable_segments:True DX_ALLOW_META_CHANGE=1 "MP_SERVER_ARGS='$SA'" >> $D/logs/fnsup3_$1.out 2>&1 < /dev/null 7>&- &
+    MP_TASKS=$tasks MP_STOP_FILE_OVERRIDE=$D/servers/DRAIN_${sj:-none} MP_LOG_TAG=_$1 MP_ALLOC_CONF=expandable_segments:True DX_ALLOW_META_CHANGE=1 "MP_SERVER_ARGS='$SA'" >> $D/logs/fnsup3_$1.out 2>&1 < /dev/null 7>&- &
   disown
 }
 log "fn supervisor3 start (pid $$, DRY=${DRY:-0}, t11 threads $TH11, t12 threads $TH12)"

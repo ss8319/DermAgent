@@ -59,12 +59,20 @@ run() {
   # RELEASE_<job> (written by mp_fn_supervisor3 when this server had no runner for 60 min and no role is waiting): stop holding,
   # so the job empties and the watchdog releases it instead of 4 GPUs idling for days (M3 cancels idle GPU jobs).
   local hf=0 it=0 n MK=${J}_${SLURM_RESTART_COUNT:-0}
-  rm -f $FND/servers/RELEASE_$J
+  rm -f $FND/servers/RELEASE_$J $FND/servers/DRAIN_$J
+  # 11-15 DRAIN: FN_DRAIN_S (3 h) before this job's walltime, touch DRAIN_<job> (its runner's MP_STOP_FILE: no new cases, in-flight
+  # ones finish) and unregister, so ~a full batch of multi-hour cases is not killed mid-way at walltime (H200 fit job = 12 h).
+  local END=""
   while [ ! -f $FND/servers/HOLD_STOP ]; do
     if [ -f $FND/servers/RELEASE_$J ]; then
       rm -f $FND/servers/RELEASE_$J; hist released_no_runner
       echo "$(date '+%m-%d %H:%M') FN-SERVER $J $(hostname) ($GPU): no runner for 60 min and no role waiting: released (watchdog frees the job)" >> $B0/logs/gpu_watchdog/alerts.log
       break
+    fi
+    [ -z "$END" ] && END=$(date -d "$(squeue -h -j $J -o %e 2>/dev/null)" +%s 2>/dev/null)
+    if [ -n "$END" ] && [ ! -f $FND/servers/DRAIN_$J ] && [ $(( END - $(date +%s) )) -lt ${FN_DRAIN_S:-10800} ]; then
+      touch $FND/servers/DRAIN_$J; rm -f $FND/servers/$J.url; hist draining
+      echo "$(date '+%m-%d %H:%M') FN-SERVER $J $(hostname) ($GPU): $(( (END - $(date +%s)) / 60 )) min to walltime: DRAIN (no new cases; in-flight cases finish)" >> $B0/logs/gpu_watchdog/alerts.log
     fi
     if curl -sf -m 30 http://127.0.0.1:$PORT/health >/dev/null; then hf=0; else hf=$((hf+1)); fi
     if [ $hf -ge 3 ]; then
