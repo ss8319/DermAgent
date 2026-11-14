@@ -2,7 +2,9 @@
 # FAIL): same A100/H100 settings with mem-fraction 0.90. Otherwise a no-op that stops the server (lands in failed/ by design), so a
 # job whose server failed the reference check does not keep 4 GPUs: the watchdog releases it after 2 h idle with an empty queue.
 B0=/fs04/scratch2/ub62/ssim0070/benchmark_runs
+# 11-14: not after a mid-run crash (DIED_<job>): 10_ itself queued the relaunches (10r<n>) for that.
 if [ -f $Q/failed/10_fn_server_v2.req ] && [ ! -f $B0/dx/medagentpro-qwen3.8-flash-next/servers/REFCHECK_FAILED_$SLURM_JOB_ID ] \
+   && [ ! -f $B0/dx/medagentpro-qwen3.8-flash-next/servers/DIED_$SLURM_JOB_ID ] \
    && ! nvidia-smi --query-gpu=name --format=csv,noheader | head -1 | grep -q H200; then
   FN_MF=0.88; source $B0/agents/medagentpro_reqs/10_fn_server_v2.req
 else

@@ -51,6 +51,7 @@ slot() {  # first "host gpu" that can take one more runner (free >= 21000 MiB an
       echo "#"; for p in $(pgrep -f "[r]un_dermarena_v1_medagentpro.py"); do tr "\0" "\n" < /proc/$p/environ | grep "^CUDA_VISIBLE_DEVICES=" | cut -d= -f2; done' 2>/dev/null \
     | awk -v j=$j -F, '/^#/{m=1;next} !m{g[$1]=$2; t[$1]=$3; next} m{n[$1]++} END{for(i in g) if(g[i]>=21000 && n[i]+0 < int(t[i]/21000)) print j, i}' | head -1
   done | head -1; }
+cap_of() { local c; c=$(args_of "$1" | grep -oE -- '--max-running-requests [0-9]+' | grep -oE '[0-9]+$'); echo ${c:-0}; }
 launch() {  # $1 role  $2 server url  $3 host  $4 gpu
   local SA tasks sh th; SA=$(args_of "$2")
   case $1 in t11) tasks=T1.1; sh="0 1"; th=$TH11;; t12_s0) tasks=T1.2; sh="0 2"; th=$TH12;; t12_s1) tasks=T1.2; sh="1 2"; th=$TH12;; esac
@@ -85,10 +86,11 @@ while [ ! -f $D/FN_SUP3_STOP ]; do
     else  # T1.2: while T1.1 runs, only on a server without the t11 runner
       # 11-14: choose the eligible server with the FEWEST runners (was: the first one), so a replacement runner never doubles up on
       # one server while another (e.g. a new H200) has none.
-      t11srv=$(srv_of t11); tgt=""; bn=99
+      t11srv=$(srv_of t11); tgt=""; bn=99; bc=0
       for u in $servers; do
         if [ $l11 -gt 0 ] && { [ "$u" = "$t11srv" ] || { [ -z "$t11srv" ] && [ "$u" = "$first" ]; }; }; then continue; fi
-        n=$(echo "$run" | awk -v u="$u" '$4==u' | grep -c .); [ $n -lt $bn ] && { bn=$n; tgt=$u; }
+        n=$(echo "$run" | awk -v u="$u" '$4==u' | grep -c .); c=$(cap_of $u)   # 11-14: ties -> larger cap (H200 over A100)
+        if [ $n -lt $bn ] || { [ $n -eq $bn ] && [ $c -gt ${bc:-0} ]; }; then bn=$n; bc=$c; tgt=$u; fi
       done
       # 11-14: at most ONE T1.2 runner per server (tool slots are scarce: the A40 holds 2). Two runners on one cap-96 server only
       # queue, and would leave the next server (fit 4xA100, H200) without a runner until a slot frees.
@@ -99,6 +101,24 @@ while [ ! -f $D/FN_SUP3_STOP ]; do
     launch $r $tgt $sl
     run="$run"$'\n'"${sl% *} 0 $r $tgt"; sleep 30 7>&-
   done
+  # 11-14 auto-fallback UPGRADE: every role runs, and a live server WITHOUT a runner has >= 2x the cap of the smallest-cap server
+  # that has a T1.2 runner (e.g. an H200, cap 220, arriving while the runners sit on 4xA100s, cap 96) and no tools slot is free:
+  # stop that runner; the next pass relaunches its role on the bigger server (ties go to the larger cap). Finished cases are kept;
+  # in-flight ones restart. Never ping-pongs (the freed small server is < 2x of the big one).
+  if [ -z "$want" ] && [ -n "$servers" ]; then
+    big=""; bigc=0
+    for u in $servers; do echo "$run" | awk -v u="$u" '$4==u' | grep -q . && continue; c=$(cap_of $u); [ $c -gt $bigc ] && { bigc=$c; big=$u; }; done
+    if [ -n "$big" ]; then
+      vic=$(echo "$run" | awk '$3 ~ /^t12_s/ && $2 > 1' | while read h pg r u; do echo "$(cap_of $u) $h $pg $r $u"; done | sort -n | head -1)
+      if [ -n "$vic" ]; then set -- $vic
+        if [ "$1" -gt 0 ] && [ $bigc -ge $(( 2 * $1 )) ] && [ -z "$(slot)" ]; then
+          log "UPGRADE: stop $4 on $5 (cap $1, host $2 pgid $3) so the next pass moves it to $big (cap $bigc, no runner)"
+          echo "$(date '+%m-%d %H:%M') FN-UPGRADE moving $4 from $5 (cap $1) to $big (cap $bigc)" >> $B/logs/gpu_watchdog/alerts.log
+          [ -z "$DRY" ] && srun --jobid=$2 --overlap -n1 -c1 --mem=1G kill -TERM -- -$3 2>/dev/null
+        fi
+      fi
+    fi
+  fi
   [ -n "$DRY" ] && { log "DRY: one pass only"; break; }
   sleep 300 7>&-
 done

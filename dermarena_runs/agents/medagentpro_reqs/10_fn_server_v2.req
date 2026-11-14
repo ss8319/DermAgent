@@ -52,7 +52,24 @@ run() {
   # as soon as every T1.1 case is done, so the next request (12_judge_fn_t11.req) judges T1.1, then 13_ resumes Flash-Next for T1.2.
   local T11=0; [ -f $Q/HOLD_T11_ONLY ] && [[ "$(basename "$req")" == 10_* ]] && T11=1
   [ $T11 = 1 ] && echo "[fn-v2] HOLD_T11_ONLY: this server releases when T1.1 is complete"
+  # 11-14 auto-fallback: the server is health-checked every 60 s while it holds. After 3 failures in a row it is DEAD: unregister,
+  # mark DIED_<job> (11_ then does not retry), and queue a relaunch IN THIS ALLOCATION (10r<n>, sorts before 11_; at most 3; the
+  # 2nd+ use mem-fraction 0.88 on 80 GB GPUs). Before this, a crashed server left run() sleeping forever and 4 GPUs idle.
+  local hf=0 it=0 n
   while [ ! -f $FND/servers/HOLD_STOP ]; do
+    if curl -sf -m 30 http://127.0.0.1:$PORT/health >/dev/null; then hf=0; else hf=$((hf+1)); fi
+    if [ $hf -ge 3 ]; then
+      rm -f $FND/servers/$J.url; touch $FND/servers/DIED_$J
+      n=$(( $(cat $FND/servers/relaunches_$J 2>/dev/null || echo 0) + 1 )); echo $n > $FND/servers/relaunches_$J; hist "DEAD_relaunch_$n"
+      if [ $n -le 3 ]; then
+        { [ $n -ge 2 ] && echo "FN_MF=0.88"; cat $B0/agents/medagentpro_reqs/10_fn_server_v2.req; } > $Q/10r${n}_fn_server_relaunch.req
+        echo "$(date '+%m-%d %H:%M') FN-SERVER DIED $J $(hostname) ($GPU): relaunch $n/3 queued in the same allocation (see $OUT/server_${J}.log)" >> $B0/logs/gpu_watchdog/alerts.log
+      else
+        echo "$(date '+%m-%d %H:%M') FN-SERVER DIED $J $(hostname) ($GPU) for the 4th time: no more relaunches; the holder empties and the watchdog releases it" >> $B0/logs/gpu_watchdog/alerts.log
+      fi
+      return 1
+    fi
+    it=$((it+1)); [ $(( (it - 1) % 10 )) -ne 0 ] && { sleep 60; continue; }   # case count every 10 min
     left=$(python3 - "$FND" $T11 <<'PY'
 import json,glob,sys
 D=sys.argv[1]; R="/fs04/scratch2/ub62/ssim0070/DermArena_release/DermArena_v1/tasks"; n=0
@@ -67,7 +84,7 @@ print(n)
 PY
 )
     [ "${left:-1}" = 0 ] && break
-    sleep 600
+    sleep 60
   done
   rm -f $FND/servers/$J.url; hist released$([ $T11 = 1 ] && echo _T11_done); echo "[fn-v2] $(date '+%m-%d %H:%M') Flash-Next done (T1.1-only=$T11, or HOLD_STOP): release"
 }
