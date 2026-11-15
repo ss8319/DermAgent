@@ -89,6 +89,11 @@ while [ ! -f $W/STOP ]; do
       [ -z "$DRY" ] && setsid nohup bash $B/agents/mp_fn_supervisor3.sh >> $FN/logs/fnsup3_supervisor.out 2>&1 < /dev/null 9>&- &
     fi
   fi
+  # A (11-16): the on-demand A40 tools-host helper must be alive while Flash-Next has work
+  if [ ! -f $B/agents/A40_ONDEMAND_STOP ] && ! pgrep -f '^bash \S*a40_ondemand\.sh$' >/dev/null 2>&1 && [ "$(fn_left)" -gt 0 ]; then
+    alert "A a40_ondemand.sh not running (work left): relaunching detached on $(hostname)"
+    [ -z "$DRY" ] && setsid nohup bash $B/agents/a40_ondemand.sh >> $B/logs/a40_ondemand.out 2>&1 < /dev/null 9>&- &
+  fi
   echo "updated $(date '+%m-%d %H:%M')" >> $W/status.new; mv $W/status.new $W/status.txt
   [ -n "$ONCE" ] && break
   sleep $EVERY 9>&-
