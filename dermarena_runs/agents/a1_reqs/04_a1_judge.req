@@ -1,0 +1,27 @@
+# 04 A1 judge: Qwen3.6-27B, DX_JUDGE_PASSES=3, same settings as the ablation arms (40_abl_judge_all: dp4, qwen3 parser, mem 0.90,
+# mamba 2.0, CTX 32768; H200 cuda-graph 128 / 64 workers per task; 80 GB A100/H100 cuda-graph 40 / 32 workers per task).
+# Judges only arms whose inference is DONE (DX_MODEL_DONE); waits up to 3 h for unfinished ones, then leaves them to the next holder.
+source /fs04/scratch2/ub62/ssim0070/benchmark_runs/agents/a1_reqs/_a1_common.sh
+A1_SLUGS="qwen3.5-9b-findingskept-img huatuogpt-3-27b-findingskept-img glm-4.6v-findingskept-img"
+a1_all_judged() { local s; for s in $A1_SLUGS; do grep -qs "^JUDGE_DONE $s " $B0/holders/*/out/runs.log || return 1; done; }
+if a1_all_judged; then a1_done_guard "."; else
+MODEL=Qwen/Qwen3.6-27B
+case "$A1_GPU" in *H200*) A1_G=128; A1_W=64;; *) A1_G=40; A1_W=32;; esac
+SERVE_ARGS="--dp-size 4 --reasoning-parser qwen3 --mem-fraction-static 0.90 --cuda-graph-max-bs $A1_G --mamba-full-memory-ratio 2.0"
+CTX=32768
+source $B0/local_weights.sh; local_weights "$MODEL" || return 1
+[ "$MODEL|${CTX:-65536}|${SERVE_ARGS:-}" != "${CUR:-}" ] && bash $B0/clean_gpu.sh
+run() {
+  local s t0=$(date +%s) todo
+  while :; do
+    todo=""
+    for s in $A1_SLUGS; do grep -qs "^JUDGE_DONE $s " $B0/holders/*/out/runs.log && continue; todo="$todo $s"
+      grep -qs "^DX_MODEL_DONE $s " $B0/holders/*/out/runs.log || continue
+      DX_JUDGE_PASSES=3 DX_JUDGE_WORKERS=$A1_W bash $B0/tools/guarded.sh "${OPENROUTER_BASE_URL%/v1}/health" bash $B0/dx/judge_dx.sh $s
+    done
+    a1_all_judged && { echo "[a1] all three A1 arms judged $(date)"; return 0; }
+    [ $(( $(date +%s) - t0 )) -gt 10800 ] && { echo "[a1] still not inferred after 3 h:$todo; leaving them to the next holder $(date)"; return 0; }
+    sleep 600
+  done
+}
+fi

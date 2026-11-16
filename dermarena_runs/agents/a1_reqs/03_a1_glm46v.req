@@ -1,0 +1,14 @@
+# 03 A1 arm D: GLM-4.6V. Serving = the ablation arms (10_abl_glm46v_findingskept): tp4, glm45 parser, cuda-graph 128, CTX 131072,
+# DX_EXAMINEE_CONTEXT=131072, 128 workers. 80 GB GPUs: mem-fraction 0.90 (more KV room for ~216 GB of weights; scheduling flag only).
+# Weights are not in the Lustre cache: local_weights downloads ~201 GB to node /tmp.
+source /fs04/scratch2/ub62/ssim0070/benchmark_runs/agents/a1_reqs/_a1_common.sh
+if ! a1_done_guard "^DX_MODEL_DONE glm-4.6v-findingskept-img "; then
+MODEL=zai-org/GLM-4.6V
+SERVE_ARGS="--tp-size 4 --reasoning-parser glm45 --cuda-graph-max-bs 128"
+case "$A1_GPU" in *H200*) ;; *) SERVE_ARGS="$SERVE_ARGS --mem-fraction-static 0.90";; esac
+CTX=131072
+source $B0/lock.sh; skip_if_taken glm-4.6v-findingskept-img && return 0
+source $B0/local_weights.sh; local_weights "$MODEL" || return 1
+[ "$MODEL|${CTX:-65536}|${SERVE_ARGS:-}" != "${CUR:-}" ] && bash $B0/clean_gpu.sh
+run() { export DX_EXAMINEE_CONTEXT=131072; bash $B0/tools/guarded.sh "${OPENROUTER_BASE_URL%/v1}/health" bash $B0/dx/run_dx_model_findingskept_img.sh zai-org/GLM-4.6V glm-4.6v-findingskept-img 128; }
+fi
