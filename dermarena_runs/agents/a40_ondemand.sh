@@ -23,16 +23,24 @@ for t,d in (("T1.1","T1.1_disease_screening"),("T1.2","T1.2_disease_confirmation
 print(n)
 PY
 }
-need() {  # 0 = a server job runs or is due within LEAD_S; prints the reason
-  local q j name st s h now=$(date +%s) t
+a1_judged() { local x; for x in qwen3.5-9b huatuogpt-3-27b glm-4.6v; do grep -qs "^JUDGE_DONE $x-findingskept-img " $B/holders/*/out/runs.log || return 1; done; }
+next_req() {  # $1 holder: first request still queued; A1 requests count as done once all three A1 arms are judged (their guards skip)
+  local f a1=0; a1_judged && a1=1
+  for f in $(ls $B/holders/$1/queue/*.req 2>/dev/null | sort); do
+    [ $a1 = 1 ] && [[ "$(basename $f)" == 0*_a1_* ]] && continue; basename $f; return; done; }
+need() {  # 0 = a Flash-Next server is up, about to come up, or comes after the request now running; prints the reason
+  # 11-16: a server holder counts only when its next request is the A1 judge (04, ~2-4 h before Flash-Next) or a Flash-Next one
+  # (1x_). Before: the fit A100 would have pulled the A40 in ~10 h before Flash-Next while its A1 inference ran (idle tools host).
+  local q j name st s h nr now=$(date +%s) t
   q=$(squeue -u $USER -h -o "%i|%j|%T|%S" 2>/dev/null) || return 1
   while IFS='|' read -r j name st s; do
     h=${name#bench-}; [ -d $B/holders/$h ] || h=${h//-/_}
     ls $B/holders/$h/queue/10*fn_server*.req >/dev/null 2>&1 || continue
-    [ "$st" = RUNNING ] && { echo "$name running"; return 0; }
+    nr=$(next_req $h); [[ "$nr" == 04_a1_judge* || "$nr" == 1* ]] || continue
+    [ "$st" = RUNNING ] && { echo "$name running, next request $nr"; return 0; }
     [[ "$s" =~ ^20[0-9-]+T ]] || continue
     t=$(date -d "$s" +%s 2>/dev/null) || continue
-    [ $((t - now)) -le $LEAD_S ] && { echo "$name due $s"; return 0; }
+    [ $((t - now)) -le $LEAD_S ] && { echo "$name due $s, next request $nr"; return 0; }
   done <<< "$q"
   return 1
 }
@@ -42,6 +50,7 @@ while [ ! -f $B/agents/A40_ONDEMAND_STOP ]; do
   if [ $rc -eq 0 ] && [ -z "$q" ] && why=$(need); then
     l=$(left); [ "$l" = 0 ] && { log "no Flash-Next case left: exit"; exit 0; }
     if [ -n "$l" ]; then
+      rm -f $B/holders/a40tools/queue/STOP   # 11-16: a previous A40 job ended itself with STOP (the queue folder is shared)
       out=$(cd /fs04/scratch2/ub62/ssim0070/sglang/slurm && env $(env | grep -oE '^SLURM_[A-Z_]+' | sed 's/^/-u /') sbatch -J bench-a40tools -p desktop --qos=desktopq --gres=gpu:A40:1 -c 16 --mem=150G -t 7-00:00:00 bench_holder.sbatch a40tools 2>&1)
       J=$(echo "$out" | grep -oE 'Submitted batch job [0-9]+' | grep -oE '[0-9]+$')
       if [ -n "$J" ]; then
