@@ -1,0 +1,16 @@
+# 07 (owner 11-17 "which saves us time? go w that. gotta be more aggressive"): after A1, END this 4x80 GB fit job instead of loading
+# Flash-Next when no MedAgent-Pro tools host is RUNNING. Why: Flash-Next cannot run without a tools host (A40 est. Wed 09:56), this job
+# must drain Flash-Next by ~04:00 Wed (walltime 06:58), and while it runs our fit H200 job waits (QOSMaxGRESPerUser, one 4-GPU fit
+# job per user). Ending it frees the per-user slot so the faster H200 (Flash-Next cap 220 vs 96) can start.
+# If a tools host IS running when this request is reached, it is a no-op and Flash-Next (10_) starts here as before.
+B0=/fs04/scratch2/ub62/ssim0070/benchmark_runs
+up=""; for j in $(grep -oE '^[0-9]+' $B0/agents/mp_tool_hosts.txt); do [ "$j" = "${SLURM_JOB_ID:-}" ] && continue
+  [ "$(squeue -h -j $j -o %T 2>/dev/null)" = RUNNING ] && up="$up $j"; done
+if [ -n "$up" ]; then
+  echo "[07] tools host running:$up -> keep this job for Flash-Next $(date)"
+else
+  echo "[07] no tools host running -> ending this job so the fit H200 can start (owner 11-17) $(date)"
+  echo "$(date '+%m-%d %H:%M') ${NAME:-?} ${SLURM_JOB_ID:-?}: A1 done, no tools host running: job ends itself to free the fit per-user slot for the H200 (owner 11-17)" >> $B0/logs/gpu_watchdog/alerts.log
+  touch $Q/STOP
+fi
+IFS='|' read -r MODEL CTX SERVE_ARGS <<< "${CUR:-}"; run() { :; }

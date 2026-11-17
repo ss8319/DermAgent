@@ -1,0 +1,13 @@
+# 03b (11-17) automatic retry for 03_a1_glm46v.req: runs 03 once more if the GLM-4.6V arm D is still unfinished after it (weight
+# download failed, server failed to start or died) and 03 did not stop at a gate (canary failed / input refused: those need a
+# person; the gate is never lowered). Same settings; finished rows are kept. Otherwise a no-op that keeps the current server.
+source /fs04/scratch2/ub62/ssim0070/benchmark_runs/agents/a1_reqs/_a1_common.sh
+A1_SLUG=glm-4.6v-findingskept-img
+if grep -qs "^DX_MODEL_DONE $A1_SLUG " $B0/holders/*/out/runs.log || grep -qsE "(CANARY FAILED|INFER REFUSED).* stopping $A1_SLUG\$" $OUT/runs.log; then
+  echo "[a1] 03b: nothing to retry for $A1_SLUG (finished, or stopped at a gate) $(date)"
+  IFS='|' read -r MODEL CTX SERVE_ARGS <<< "${CUR:-}"; run() { :; }
+else
+  echo "[a1] 03b: $A1_SLUG not finished after 03: retrying $(date)"
+  echo "$(date '+%m-%d %H:%M') A1 ${NAME:-?} ${SLURM_JOB_ID:-?}: 03 GLM-4.6V did not finish; 03b retry started" >> $B0/logs/gpu_watchdog/alerts.log
+  source /fs04/scratch2/ub62/ssim0070/benchmark_runs/agents/a1_reqs/03_a1_glm46v.req
+fi

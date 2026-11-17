@@ -1,0 +1,2 @@
+#!/bin/bash
+case "$*" in *query-gpu=name*) for i in 1 2 3 4; do echo "${SIM_GPU:-NVIDIA A100-SXM4-80GB}"; done;; *memory.used*) echo 0;; *) echo "GPU 0-3: ${SIM_GPU:-NVIDIA A100-SXM4-80GB} (sim)";; esac

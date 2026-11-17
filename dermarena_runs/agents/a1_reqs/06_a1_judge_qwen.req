@@ -1,0 +1,31 @@
+# 06 (11-17, owner "finish the ablation ASAP"): judge every A1 arm that is inferred but not yet judged, ALL AT ONCE (one judge_dx
+# per arm in parallel). Why: 04 judged one arm at a time with 32 workers per task = 96 requests on a server that admits 120
+# (4 replicas x max_running_requests 30), and each arm's last ~40 min ran half-empty (Huatuo 11-17: 720 judge calls per 10 min,
+# then 460 / 440 / 390 / 72). Here each arm sends 40 per task, so the server stays full until the last arm ends; extra requests
+# wait in the server queue. Same judge model, sampling, prompt, code and server settings as 04 (verdicts do not depend on the
+# number of parallel requests). Resumable: verdicts already on disk are kept (an unreadable verdict file is judged again).
+source /fs04/scratch2/ub62/ssim0070/benchmark_runs/agents/a1_reqs/_a1_common.sh
+A1_SLUGS="qwen3.5-9b-findingskept-img huatuogpt-3-27b-findingskept-img glm-4.6v-findingskept-img"
+a1_all_judged() { local s; for s in $A1_SLUGS; do grep -qs "^JUDGE_DONE $s " $B0/holders/*/out/runs.log || return 1; done; }
+if a1_all_judged; then a1_done_guard "."; else
+MODEL=Qwen/Qwen3.6-27B
+case "$A1_GPU" in *H200*) A1_G=128; A1_W=64;; *) A1_G=40; A1_W=40;; esac
+SERVE_ARGS="--dp-size 4 --reasoning-parser qwen3 --mem-fraction-static 0.90 --cuda-graph-max-bs $A1_G --mamba-full-memory-ratio 2.0"
+CTX=32768
+source $B0/local_weights.sh; local_weights "$MODEL" || return 1
+[ "$MODEL|${CTX:-65536}|${SERVE_ARGS:-}" != "${CUR:-}" ] && bash $B0/clean_gpu.sh
+run() {
+  local s todo="" pids=() p
+  for s in $A1_SLUGS; do grep -qs "^JUDGE_DONE $s " $B0/holders/*/out/runs.log && continue
+    grep -qs "^DX_MODEL_DONE $s " $B0/holders/*/out/runs.log || { todo="$todo $s"; continue; }
+    echo "[a1] 06: judging $s in parallel ($A1_W per task) $(date)"
+    DX_JUDGE_PASSES=3 DX_JUDGE_WORKERS=$A1_W bash $B0/tools/guarded.sh "${OPENROUTER_BASE_URL%/v1}/health" bash $B0/dx/judge_dx.sh $s &
+    pids+=($!)
+  done
+  for p in "${pids[@]}"; do wait $p; done
+  a1_all_judged && { echo "[a1] all three A1 arms judged $(date)"; return 0; }
+  echo "[a1] 06: still not judged:$(for s in $A1_SLUGS; do grep -qs "^JUDGE_DONE $s " $B0/holders/*/out/runs.log || echo -n " $s"; done) (not inferred:${todo:- none}); leaving them to the next holder $(date)"
+  echo "$(date '+%m-%d %H:%M') A1 ${NAME:-?} ${SLURM_JOB_ID:-?}: 06 ended with A1 arms not judged; see holders/${NAME:-?}/out/runs.log" >> $B0/logs/gpu_watchdog/alerts.log
+  return 0
+}
+fi
