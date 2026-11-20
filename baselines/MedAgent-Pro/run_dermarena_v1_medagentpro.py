@@ -1804,33 +1804,16 @@ def main():
         for task, out_dir, todo in work:
             if todo and not (jd / "STOP").exists():
                 run_task(ctx, task, out_dir, todo, k, thr)
-        # .done only when every planned case has a row of this run_sig (a stop file or a case still dropped after pass 2
-        # would otherwise mark the job finished, and a restarted worker would never pick it up again)
-        left = {t: [r["_id"] for r in td if r["_id"] not in v1.done_ids(od, run_sig)] for t, od, td in work}
-        n_left = sum(len(v) for v in left.values())
-        if n_left and (jd / "STOP").exists():
-            continue  # worker stops; the job stays open for the next start
-        if n_left:
-            (jd / f"{jf.stem}.p{k}.incomplete").write_text(json.dumps({"time": v1.now(), "run_sig": run_sig, "missing": left}))
-            print(f"[mp] SERVICE job {jf.stem} shard {k}: {n_left} case(s) without a row -> {jf.stem}.p{k}.incomplete, "
-                  f"not .done (delete the marker to retry)", flush=True)
-            continue
-        (jd / f"{jf.stem}.p{k}.done").write_text(v1.now())
-        if k == 0:
-            fin = lambda x: (jd / f"{jf.stem}.p{x}.done").exists() or (jd / f"{jf.stem}.p{x}.incomplete").exists()  # noqa: E731
-            while not all(fin(x) for x in range(n)) and not (jd / "STOP").exists():
-                time.sleep(20)
-            for task, out_dir, _ in work:
+        # .done / .incomplete / ALLDONE / ENDED_INCOMPLETE: v1.finish_job() (shared with the DermAgent runner)
+        def merge_and_check(plan):
+            for task, out_dir, _ in plan:
                 v1.merge(out_dir)
                 r = subprocess.run(["python3", str(DC / "dx_benchmark/dx_check.py"), "post", str(out_dir), task,
                                     itmpl.format(task=task, task_dir=TASK_DIR[task])], capture_output=True, text=True)
                 r2 = subprocess.run([sys.executable, str(HERE / "mp_postcheck.py"), str(out_dir), task], capture_output=True, text=True)
                 (out_dir / "POSTCHECK.txt").write_text(r.stdout + r.stderr + r2.stdout + r2.stderr)
                 print(f"[mp] SERVICE postcheck {jf.stem} {task}:\n{r.stdout[-1500:]}", flush=True)
-            if all((jd / f"{jf.stem}.p{x}.done").exists() for x in range(n)):
-                (jd / f"{jf.stem}.ALLDONE").write_text(v1.now())
-            else:
-                print(f"[mp] SERVICE job {jf.stem}: not every shard is .done (stopped or .incomplete) — no ALLDONE", flush=True)
+        v1.finish_job(jd, jf.stem, k, n, work, v1.shard_left(work), run_sig, merge_and_check, tag="[mp]")
     print("[mp] SERVICE STOP seen — exiting", flush=True)
 
 
