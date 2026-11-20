@@ -11,8 +11,10 @@ if pgrep -u $USER -f "[r]un_dermarena_v1_medagentpro.py" >/dev/null && [ -n "${C
           cp $B0/agents/medagentpro_reqs/70_fn_server_hold.req $Q/$nb; }
   return 0
 fi
+# 11-13 (owner OK): running-request cap 160 -> 220 (scheduling only; measured mamba pool 63 % at 160 -> ~254 max,
+# 220 keeps ~13 % headroom). Runners resume with DX_ALLOW_META_CHANGE=1 + MP_SERVER_ARGS = these args; logged in META_OVERRIDES.txt.
 MODEL=Qwen/Qwen3.8-Flash-Next
-SERVE_ARGS="--tp-size 4 --ep-size 4 --dtype bfloat16 --reasoning-parser qwen3 --tool-call-parser qwen3_coder --chunked-prefill-size 8192 --max-running-requests 160 --cuda-graph-max-bs-decode 160"
+SERVE_ARGS="--tp-size 4 --ep-size 4 --dtype bfloat16 --reasoning-parser qwen3 --tool-call-parser qwen3_coder --chunked-prefill-size 8192 --max-running-requests 220 --cuda-graph-max-bs-decode 224"
 CTX=81920
 source $B0/local_weights.sh; local_weights "$MODEL" || return 1
 export SGLANG_CONTAINER=/fs04/scratch2/ub62/ssim0070/sglang/containers/sglang_v0522.sif

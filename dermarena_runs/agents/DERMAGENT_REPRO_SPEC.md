@@ -835,3 +835,10 @@ Requests in agents/medagentpro_reqs/. Morning/next check: speed per server, any 
   h200x4e if it starts), tools on h100x4c (+ any non-server host living > 3 h), rebalance >=6 vs <=2 runners. h200x4d ends 19:00.
 - Queues: h200x4d 62 retired; h200x4e all retired (ablation done, Qwen 50 takeover, 61/62) -> only 70; bdiimg 70; h100x4c 090 tools-host
   after 020. Retired files: agents/ops/retired_reqs_20261112/.
+
+### 11-12 13:50 — owner decisions + queue changes
+- Owner: backup is going to the owner's laptop (owner handles it). Keep Hulu-Med-Flash-27B and Qwen3.8-27B for now (decide Friday; may be needed later).
+- Owner OK'd one more H200 job: bench-h200x4f 62559983 (fit, 1 d, H200x4), queue = 70_fn_server_hold.req (Flash-Next server for T1.2).
+  Waits on QOSMaxGRESPerUser behind h200x4d/h200x4e. NOT in mp_hosts' HOSTS_FILE, so never a tools slot.
+- 037_judge_rolling_qwen_fn.req on gpu2a100 (judge idled after 038 at 13:32): judges both runs every 20 min until Qwen inference is done; 041 then finalises.
+- Retired stale gpu2a100c/d 010_medagentpro_full_1shard_a100.req (Qwen shard takeover) -> agents/ops/retired_reqs_20261112/.

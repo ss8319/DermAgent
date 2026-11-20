@@ -1,0 +1,13 @@
+# 02 A1 arm D: HuatuoGPT-3-27B. Serving = the ablation arms: dp4, qwen3 parser, mem-fraction 0.90, mamba ratio 2.0, CTX 81920;
+# H200: cuda-graph 96 / 320 workers (30_abl_huatuo27b_findingskept); 80 GB A100/H100: cuda-graph 40 / 160 workers (the A100 values).
+source /fs04/scratch2/ub62/ssim0070/benchmark_runs/agents/a1_reqs/_a1_common.sh
+if ! a1_done_guard "^DX_MODEL_DONE huatuogpt-3-27b-findingskept-img "; then
+MODEL=FreedomIntelligence/HuatuoGPT-3-27B
+case "$A1_GPU" in *H200*) A1_G=96; A1_W=320;; *) A1_G=40; A1_W=160;; esac
+SERVE_ARGS="--dp-size 4 --reasoning-parser qwen3 --mem-fraction-static 0.90 --cuda-graph-max-bs $A1_G --mamba-full-memory-ratio 2.0"
+CTX=81920
+source $B0/lock.sh; skip_if_taken huatuogpt-3-27b-findingskept-img && return 0
+source $B0/local_weights.sh; local_weights "$MODEL" || return 1
+[ "$MODEL|${CTX:-65536}|${SERVE_ARGS:-}" != "${CUR:-}" ] && bash $B0/clean_gpu.sh
+run() { bash $B0/tools/guarded.sh "${OPENROUTER_BASE_URL%/v1}/health" bash $B0/dx/run_dx_model_findingskept_img.sh FreedomIntelligence/HuatuoGPT-3-27B huatuogpt-3-27b-findingskept-img $A1_W; }
+fi

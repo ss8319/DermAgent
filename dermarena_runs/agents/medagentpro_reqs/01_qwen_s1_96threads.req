@@ -1,0 +1,7 @@
+# 01 (a40tools, 11-12 11:30): bdiimg node failure ~10:50 killed Qwen shards 0/1; v5 restarted s1 (81 cases left) at only 32 threads on
+# gpu2a100b -> ~3 rounds of ~2.8 h. Restart s1 at 96 threads so every remaining case runs at once (it had just reloaded tools: little lost).
+# Client lives in THIS holder (persistent). MODEL=__tools_host__: no server here (request lands in failed/ by design).
+PREFER_HOST=62151003 setsid nohup bash /fs04/scratch2/ub62/ssim0070/benchmark_runs/agents/mp_take_shard.sh 1 http://m3n100:30734/v1 x 96 \
+  >> /fs04/scratch2/ub62/ssim0070/benchmark_runs/logs/qwen96_s1.out 2>&1 < /dev/null &
+MODEL=__tools_host__; CTX=1024; SERVE_ARGS=""
+run() { return 0; }

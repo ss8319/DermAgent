@@ -17,6 +17,9 @@ R=/fs04/scratch2/ub62/ssim0070/DermArena_release/DermArena_v1/tasks
 TOT=8; TH=${FN_THREADS:-54}; CAP=${FN_CAP:-8}; BDI=61718805
 NOTOOLS=" 61718805 62288438 62399604 61714874 "      # Flash-Next server jobs (+ L40S, ends 12 Nov 11:52): never a tools slot
 SA=$(python3 -c "import json;print(json.load(open('$D/T1.1/RUN_META.json'))['server_args'])")
+# 11-13 (owner OK): next servers run --max-running-requests 220 (see META_OVERRIDES.txt): runners must record the new args and
+# resume past the run_sig change. Set FN_NEW_CAP=0 to keep the old args.
+if [ "${FN_NEW_CAP:-1}" = 1 ]; then SA=${SA/--max-running-requests 160 --cuda-graph-max-bs-decode 160/--max-running-requests 220 --cuda-graph-max-bs-decode 224}; export DX_ALLOW_META_CHANGE=1; fi
 exec 7>$D/logs/fn_supervisor.flock; flock -n 7 || { echo "another fn supervisor holds the lock"; exit 0; }
 declare -A MISS; for s in $(seq 0 $((TOT-1))); do MISS[$s]=0; done
 log() { echo "$(date '+%m-%d %H:%M') [fn] $*" | tee -a $LOG; }

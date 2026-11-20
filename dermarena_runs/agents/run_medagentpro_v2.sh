@@ -50,7 +50,9 @@ case $MODE in
   service|kb-index|plan-probe) IN=""; OUT="" ;;
   *) echo "usage: $0 kb-ada|kb-index|canary|plans|plan-probe|rank-stability|full|service"; exit 2 ;;
 esac
-export MP_STOP_FILE=$B/dx/$SLUG/STOP_$MODE; rm -f $MP_STOP_FILE   # touch it -> workers skip remaining cases and exit
+# 11-15: MP_STOP_FILE_OVERRIDE = a per-server drain file (servers/DRAIN_<job>, set by mp_fn_supervisor3): the server's holder
+# touches it 3 h before walltime so this runner starts no new case and its in-flight cases can finish before the job ends.
+export MP_STOP_FILE=${MP_STOP_FILE_OVERRIDE:-$B/dx/$SLUG/STOP_$MODE}; rm -f $MP_STOP_FILE   # touch it -> workers skip remaining cases and exit
 
 export OPENAI_BASE_URL=${OPENROUTER_BASE_URL:?no server} OPENAI_API_KEY=local
 export HF_HOME=$HC HUGGINGFACE_HUB_CACHE=$HC/hub TRANSFORMERS_CACHE=$HC/hub HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
@@ -101,13 +103,14 @@ fi
 GATE=""; [ "$MODE" = canary ] && GATE=--gate
 REV=""; [ "$MODE" != canary ] && REV=--require-reviewed     # the runner knows the namespace: <cache>/<namespace>/REVIEWED
 
+# 11-13: MP_TASKS=T1.1 or T1.2 runs one task only; MP_LOG_TAG keeps its log separate
 pids=()
 for ((p=0; p<NPROC; p++)); do
-  if [ "$MODE" = service ]; then TARGS=(--service "$JD"); else TARGS=(--tasks T1.1,T1.2 --input-tmpl "$IN" --out-tmpl "$OUT"); fi
+  if [ "$MODE" = service ]; then TARGS=(--service "$JD"); else TARGS=(--tasks ${MP_TASKS:-T1.1,T1.2} --input-tmpl "$IN" --out-tmpl "$OUT"); fi
   # two server groups share one run (11-08: H100 + A100): MP_SHARD_BASE = first global shard of this group, MP_SHARD_TOTAL = shards of
   # all groups together; case i belongs to shard i % TOTAL; outputs (predictions.p<shard>) and logs never collide, merge reads them all
   SH=$(( ${MP_SHARD_BASE:-0} + p )); TOT=${MP_SHARD_TOTAL:-$NPROC}
-  CUDA_VISIBLE_DEVICES=${GPUS[$p]} $RUN $REV "${TARGS[@]}" --shard $SH/$TOT --threads $THREADS >> $LOG/${MODE}_p$SH.log 2>&1 &
+  CUDA_VISIBLE_DEVICES=${GPUS[$p]} $RUN $REV "${TARGS[@]}" --shard $SH/$TOT --threads $THREADS >> $LOG/${MODE}${MP_LOG_TAG:-}_p$SH.log 2>&1 &
   pids+=($!)
   sleep 10   # stagger tool loading
 done
