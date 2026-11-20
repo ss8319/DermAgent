@@ -84,38 +84,85 @@ def main():
         v1.done_ids = real
     check(left == {"T1.1": ["z", "y"]} and calls["n"] == 1, "shard_left: missing ids in plan order, one scan per task")
 
-    # F3 / F4: end markers of a service job (2 shards)
-    def scenario(name, left0, left1, stop_after=None):
+    # F3 / F4: end markers of a service job (2 shards). stop() always has a deadline, so a regressed wait loop fails the
+    # test instead of spinning forever.
+    import time as _t
+
+    def stopper(jd, secs=5.0):
+        t_end = _t.time() + secs
+        def stop():
+            if _t.time() > t_end:
+                raise SystemExit("FAIL finish_job wait loop did not exit within the deadline")
+            return (jd / "STOP").exists()
+        return stop
+
+    def fj(jd, k, left, merged, n=2):
+        with redirect_stdout(io.StringIO()):
+            return v1.finish_job(jd, "J", k, n, [("T1.1", d, [])], left, "SIG", lambda p: merged.append(k),
+                                 stop=stopper(jd), poll=0.01)
+
+    def fresh(name):
         jd = Path(_TMP) / f"jobs_{name}"
         jd.mkdir()
-        merged = []
-        plan = [("T1.1", d, [])]
-        with redirect_stdout(io.StringIO()):
-            r1 = v1.finish_job(jd, "J", 1, 2, plan, left1, "SIG", lambda p: merged.append(1), poll=0)
-            if stop_after:
-                (jd / "J.p1.done").unlink(missing_ok=True)
-                (jd / "J.p1.incomplete").unlink(missing_ok=True)
-                (jd / "STOP").write_text("x")
-            r0 = v1.finish_job(jd, "J", 0, 2, plan, left0, "SIG", lambda p: merged.append(1), poll=0)
-        return jd, merged, r0, r1
-    jd, merged, r0, r1 = scenario("all_done", {"T1.1": []}, {"T1.1": []})
-    check((jd / "J.ALLDONE").exists() and not (jd / "J.ENDED_INCOMPLETE").exists() and merged == [1],
-          "all shards done -> merge once + ALLDONE")
-    jd, merged, r0, r1 = scenario("shard1_short", {"T1.1": []}, {"T1.1": ["x"]})
-    check((jd / "J.p1.incomplete").exists() and (jd / "J.ENDED_INCOMPLETE").exists() and not (jd / "J.ALLDONE").exists()
-          and merged == [1], "F3: an incomplete shard -> merge + ENDED_INCOMPLETE (waiters get a terminal marker)")
-    jd, merged, r0, r1 = scenario("shard0_short", {"T1.1": ["x"]}, {"T1.1": []})
-    check((jd / "J.p0.incomplete").exists() and (jd / "J.ENDED_INCOMPLETE").exists() and merged == [1],
+        (jd / "J.json").write_text("{}")
+        return jd
+
+    def markers(jd):
+        return sorted(p.name for p in jd.glob("J.*") if p.name != "J.json")
+
+    jd, m = fresh("all_done"), []
+    r1, r0 = fj(jd, 1, {"T1.1": []}, m), fj(jd, 0, {"T1.1": []}, m)
+    check(r1 and r0 and m == [0] and markers(jd) == ["J.ALLDONE", "J.p0.done", "J.p1.done"],
+          "all shards done -> shard 0 merges once + ALLDONE")
+    jd, m = fresh("shard1_short"), []
+    r1, r0 = fj(jd, 1, {"T1.1": ["x"]}, m), fj(jd, 0, {"T1.1": []}, m)
+    check(r1 and r0 and m == [0] and markers(jd) == ["J.ENDED_INCOMPLETE", "J.p0.done", "J.p1.incomplete"],
+          "F3: an incomplete shard -> merge + ENDED_INCOMPLETE (waiters get a terminal marker)")
+    check(json.loads((jd / "J.ENDED_INCOMPLETE").read_text())["shards"] == {"0": "done", "1": "incomplete"},
+          "ENDED_INCOMPLETE records each shard's state")
+    jd, m = fresh("shard0_short"), []
+    r1, r0 = fj(jd, 1, {"T1.1": []}, m), fj(jd, 0, {"T1.1": ["x"]}, m)
+    check(r1 and r0 and m == [0] and markers(jd) == ["J.ENDED_INCOMPLETE", "J.p0.incomplete", "J.p1.done"],
           "F4: shard 0 incomplete still merges + postchecks + writes the end marker")
-    jd, merged, r0, r1 = scenario("stop_wait", {"T1.1": []}, {"T1.1": []}, stop_after=True)
-    check((jd / "J.p0.done").exists() and not (jd / "J.ALLDONE").exists() and not (jd / "J.ENDED_INCOMPLETE").exists(),
-          "STOP while a shard is open -> no end marker (job not finished)")
-    jd = Path(_TMP) / "jobs_stop_left"
-    jd.mkdir()
+    jd, m = fresh("one_shard"), []
+    r0 = fj(jd, 0, {"T1.1": ["x"]}, m, n=1)
+    check(r0 and m == [0] and markers(jd) == ["J.ENDED_INCOMPLETE", "J.p0.incomplete"], "n=1 incomplete -> merge + end marker")
+
+    # R1 (fix review): STOP during shard 0's wait -> no end marker; after restart shard 0 picks the job up again and finishes
+    jd, m = fresh("stop_wait"), []
     (jd / "STOP").write_text("x")
-    with redirect_stdout(io.StringIO()):
-        r = v1.finish_job(jd, "J", 0, 1, [("T1.1", d, [])], {"T1.1": ["x"]}, "SIG", lambda p: None, poll=0)
-    check(r is False and not list(jd.glob("J.*")), "STOP with cases left -> nothing written, job stays open")
+    r0 = fj(jd, 0, {"T1.1": []}, m)
+    check(r0 and m == [0] and markers(jd) == ["J.p0.done"], "STOP while shard 1 is open -> partial merge, no end marker")
+    (jd / "STOP").unlink()
+    check([p.name for p in v1.open_jobs(jd, 0)] == ["J.json"], "R1: shard 0 still owns a job without an end marker")
+    check([p.name for p in v1.open_jobs(jd, 1)] == ["J.json"], "shard 1 still has its share to do")
+    fj(jd, 1, {"T1.1": []}, m)
+    check(v1.open_jobs(jd, 1) == [], "shard 1 closes its share with .p1.done")
+    r0 = fj(jd, 0, {"T1.1": []}, m)
+    check(r0 and m == [0, 0] and (jd / "J.ALLDONE").exists() and v1.open_jobs(jd, 0) == [],
+          "R1: after restart shard 0 re-merges and writes ALLDONE; the job is then closed")
+
+    # R2: a retry ends with exactly one end marker
+    jd, m = fresh("retry"), []
+    fj(jd, 1, {"T1.1": ["x"]}, m), fj(jd, 0, {"T1.1": []}, m)
+    (jd / "J.p1.incomplete").unlink()
+    (jd / "J.ENDED_INCOMPLETE").unlink()          # the retry hint printed by finish_job
+    check([p.name for p in v1.open_jobs(jd, 0)] == ["J.json"], "R2: after the retry hint shard 0 owns the job again")
+    fj(jd, 1, {"T1.1": []}, m), fj(jd, 0, {"T1.1": []}, m)
+    check(markers(jd) == ["J.ALLDONE", "J.p0.done", "J.p1.done"], "R2: successful retry -> ALLDONE only, stale markers gone")
+
+    jd, m = fresh("stop_left"), []
+    (jd / "STOP").write_text("x")
+    r = fj(jd, 0, {"T1.1": ["x"]}, m, n=1)
+    check(r is False and m == [] and markers(jd) == [], "STOP with cases left -> nothing written, job stays open")
+
+    # wiring: both runners use the shared helpers and no done_ids() call sits in a per-case comprehension (F2)
+    import re as _re
+    for src in (HERE / "run_dermarena_v1.py", HERE.parent / "baselines/MedAgent-Pro/run_dermarena_v1_medagentpro.py"):
+        txt = src.read_text()
+        check("finish_job(" in txt and "shard_left(" in txt and "open_jobs(" in txt
+              and not _re.search(r"\bfor\b[^\n]*\bin\b[^\n]*done_ids\(", txt.split("def main")[-1]),
+              f"{src.name}: service loop uses open_jobs/shard_left/finish_job, no done_ids per case")
 
     # scripts/wait_job_end.sh: bounded wait, accepts both end markers
     import subprocess
@@ -139,7 +186,9 @@ def main():
         im.load()
         check(im.mode == "RGB" and im.size == (256, 256), "cached PNG is complete and RGB")
     check(not list(Path(os.environ["DERMAGENT_IMG_CACHE"]).glob("*.tmp.png")), "no temp PNG left in the cache")
-    print(f"\n{N['ok']}/{N['ok']} checks passed | work dir {_TMP}")
+    import shutil
+    shutil.rmtree(_TMP, ignore_errors=True)
+    print(f"\n{N['ok']}/{N['ok']} checks passed (work dir removed)")
 
 
 if __name__ == "__main__":

@@ -842,3 +842,12 @@ Requests in agents/medagentpro_reqs/. Morning/next check: speed per server, any 
   Waits on QOSMaxGRESPerUser behind h200x4d/h200x4e. NOT in mp_hosts' HOSTS_FILE, so never a tools slot.
 - 037_judge_rolling_qwen_fn.req on gpu2a100 (judge idled after 038 at 13:32): judges both runs every 20 min until Qwen inference is done; 041 then finalises.
 - Retired stale gpu2a100c/d 010_medagentpro_full_1shard_a100.req (Qwen shard takeover) -> agents/ops/retired_reqs_20261112/.
+
+## Update 2026-11-20: service-mode end markers (PR #4)
+
+Supersedes the `.done` → `ALLDONE` description in "Updates after 11:35" for runs made with this code (no effect on any finished run):
+- Each shard writes `<job>.p<k>.done`, or `<job>.p<k>.incomplete` (missing ids inside) when a planned case still has no row.
+- Shard 0 waits for every shard's marker, always merges + postchecks, then writes **one** end marker: `<job>.ALLDONE` (all shards done) or `<job>.ENDED_INCOMPLETE` (shard states inside). It keeps the job until one exists, so a STOP during its wait is finished on the next start.
+- Waiters: `scripts/wait_job_end.sh <jobdir> <job> [timeout_s]` (rc 0 ALLDONE, 2 ENDED_INCOMPLETE, 3 timeout); never `until [ -f ALLDONE ]`.
+- Resume counts every readable row (any `run_sig`); `merge` keeps the first row per `_id` and reports `MIXED run_sig` (see `META_OVERRIDES` / `SEEDED_FROM_CANARY`).
+- Retry an incomplete shard: delete `<job>.p<k>.incomplete` and `<job>.ENDED_INCOMPLETE`, then restart.

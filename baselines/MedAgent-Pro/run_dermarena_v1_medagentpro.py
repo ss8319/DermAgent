@@ -73,7 +73,8 @@ API_KEY = os.environ.get("OPENAI_API_KEY") or "local"
 
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(AG / "scripts"))
-import run_dermarena_v1 as v1  # noqa: E402  (read-only reuse: rgb_path, done_ids, merge, lock_tool_classes, now, sha_file)
+import run_dermarena_v1 as v1  # noqa: E402  (read-only reuse: rgb_path, done_ids, merge, open_jobs, shard_left, finish_job,
+#   lock_tool_classes, now, sha_file)
 from medlineplus_kb import CHUNK_PROFILES, chunk_profile_name, normalise_name, sha_path  # noqa: E402
 
 DC, RELEASE, TASK_DIR, DERM_MODALITIES = v1.DC, v1.RELEASE, v1.TASK_DIR, v1.DERM_MODALITIES
@@ -1779,14 +1780,14 @@ def main():
         return
 
     # persistent worker (= run_dermarena_v1 --service): job files <jobdir>/*.json
-    # {"tasks", "input_tmpl", "out_tmpl", "limit", "threads"}; <job>.p<k>.done; shard 0 merges + postchecks ->
-    # <job>.ALLDONE; <jobdir>/STOP ends the workers.
+    # {"tasks", "input_tmpl", "out_tmpl", "limit", "threads"}; <job>.p<k>.done or .p<k>.incomplete; shard 0 merges +
+    # postchecks -> ONE end marker <job>.ALLDONE or <job>.ENDED_INCOMPLETE (v1.finish_job / v1.open_jobs; waiters:
+    # scripts/wait_job_end.sh); <jobdir>/STOP ends the workers.
     jd = Path(a.service)
     jd.mkdir(parents=True, exist_ok=True)
     print(f"[mp] SERVICE ready (shard {k}/{n}) — polling {jd}", flush=True)
     while not (jd / "STOP").exists():
-        jobs = [j for j in sorted(jd.glob("*.json")) if not (jd / f"{j.stem}.p{k}.done").exists()
-                and not (jd / f"{j.stem}.p{k}.incomplete").exists()]
+        jobs = v1.open_jobs(jd, k)
         if not jobs:
             time.sleep(30)
             continue

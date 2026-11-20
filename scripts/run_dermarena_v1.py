@@ -230,6 +230,22 @@ def merge(out_dir: Path):
         print(f"[merge] {out_dir}: MIXED run_sig {sigs} (check META_OVERRIDES / SEEDED_FROM_CANARY)", flush=True)
 
 
+def open_jobs(jd: Path, k: int):
+    """Job files shard k still has to handle, in name order. Shards k > 0: no <stem>.p<k>.done / .p<k>.incomplete yet.
+    Shard 0 also owns the merge and the end marker, so it keeps a job until <stem>.ALLDONE or <stem>.ENDED_INCOMPLETE
+    exists (PR #4 fix review R1: a STOP during shard 0's wait used to leave a job with .p0.done, a partial merge and no
+    end marker that no restart ever finished). Re-entering a finished shard-0 share is cheap: its todo is empty."""
+    out = []
+    for j in sorted(jd.glob("*.json")):
+        if k == 0:
+            closed = (jd / f"{j.stem}.ALLDONE").exists() or (jd / f"{j.stem}.ENDED_INCOMPLETE").exists()
+        else:
+            closed = (jd / f"{j.stem}.p{k}.done").exists() or (jd / f"{j.stem}.p{k}.incomplete").exists()
+        if not closed:
+            out.append(j)
+    return out
+
+
 def shard_left(plan):
     """{task: [planned _id still without a row]} for one service job. Reads each output folder once (PR #4 review F2:
     a done_ids() call per case took ~1 s each on large folders)."""
@@ -247,17 +263,19 @@ def finish_job(jd: Path, stem: str, k: int, n: int, plan, left, run_sig, merge_a
     - shard 0 waits until every shard has a marker, then ALWAYS merges + postchecks (PR #4 review F4: also when shard 0
       itself is incomplete) and writes exactly one end marker: <stem>.ALLDONE if every shard is .done, else
       <stem>.ENDED_INCOMPLETE (PR #4 review F3: waiters need a terminal marker; scripts/wait_job_end.sh accepts both).
-      If STOP interrupts that wait, no end marker is written (the job is not finished).
+      If STOP interrupts that wait, no end marker is written and shard 0 finishes the job on its next start (open_jobs).
     merge_and_check(plan) does the merge + postcheck; stop() -> bool; returns True when the job is closed for this shard."""
     stop = stop or (lambda: (jd / "STOP").exists())
     n_left = sum(len(v) for v in left.values())
     if n_left and stop():
         return False
     if n_left:
+        (jd / f"{stem}.p{k}.done").unlink(missing_ok=True)
         (jd / f"{stem}.p{k}.incomplete").write_text(json.dumps({"time": now(), "run_sig": run_sig, "missing": left}))
-        print(f"{tag} SERVICE job {stem} shard {k}: {n_left} case(s) without a row -> {stem}.p{k}.incomplete, "
-              f"not .done (delete the marker to retry)", flush=True)
+        print(f"{tag} SERVICE job {stem} shard {k}: {n_left} case(s) without a row -> {stem}.p{k}.incomplete, not .done "
+              f"(to retry: delete {stem}.p{k}.incomplete and {stem}.ENDED_INCOMPLETE; shard 0 then re-merges)", flush=True)
     else:
+        (jd / f"{stem}.p{k}.incomplete").unlink(missing_ok=True)
         (jd / f"{stem}.p{k}.done").write_text(now())
     if k != 0:
         return True
@@ -268,11 +286,13 @@ def finish_job(jd: Path, stem: str, k: int, n: int, plan, left, run_sig, merge_a
     merge_and_check(plan)
     shards = {x: state(x) for x in range(n)}
     if all(v == "done" for v in shards.values()):
+        (jd / f"{stem}.ENDED_INCOMPLETE").unlink(missing_ok=True)   # exactly one end marker (fix review R2)
         (jd / f"{stem}.ALLDONE").write_text(now())
         print(f"{tag} SERVICE job {stem} ALLDONE", flush=True)
     elif any(v == "open" for v in shards.values()):
         print(f"{tag} SERVICE job {stem}: STOP while shards are still open {shards} — no end marker", flush=True)
     else:
+        (jd / f"{stem}.ALLDONE").unlink(missing_ok=True)
         (jd / f"{stem}.ENDED_INCOMPLETE").write_text(json.dumps({"time": now(), "shards": shards}))
         print(f"{tag} SERVICE job {stem} ENDED_INCOMPLETE {shards} (merged + postchecked; see the .incomplete markers)",
               flush=True)
@@ -431,14 +451,14 @@ def main():
 
     # ---- persistent worker (CLAUDE.md: load once, hold the allocation) ----------------------------------------
     # Job file <jobdir>/<NN_name>.json: {"tasks": "T1.1,T1.2", "input_tmpl": ..., "out_tmpl": ..., "limit": null,
-    # "threads": 12}. Every shard runs its share and writes <name>.p<k>.done; shard 0 then waits for all n,
-    # merges the shards, runs the Dx postcheck and writes <name>.ALLDONE. STOP in the jobdir ends the worker.
+    # "threads": 12}. Every shard runs its share and writes <name>.p<k>.done (or .p<k>.incomplete with the missing ids);
+    # shard 0 then waits for all n, merges, runs the Dx postcheck and writes ONE end marker: <name>.ALLDONE (all shards
+    # done) or <name>.ENDED_INCOMPLETE (finish_job). Waiters: scripts/wait_job_end.sh. STOP in the jobdir ends the worker.
     jd = Path(a.service)
     jd.mkdir(parents=True, exist_ok=True)
     print(f"[v1] SERVICE ready (shard {k}/{n}) — polling {jd}", flush=True)
     while not (jd / "STOP").exists():
-        jobs = [j for j in sorted(jd.glob("*.json")) if not (jd / f"{j.stem}.p{k}.done").exists()
-                and not (jd / f"{j.stem}.p{k}.incomplete").exists()]
+        jobs = open_jobs(jd, k)
         if not jobs:
             time.sleep(30)
             continue
