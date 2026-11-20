@@ -205,8 +205,14 @@ def done_ids(out_dir: Path):
 
 
 def merge(out_dir: Path):
+    shards = sorted(out_dir.glob("predictions.p*.jsonl"))
+    if not shards and (out_dir / "predictions.jsonl").exists():
+        # nothing to merge: never replace an existing predictions.jsonl with an empty one (e.g. a folder whose rows were
+        # written straight to predictions.jsonl, like dermagent-qwen3.5-27b-prelim/T1.1)
+        print(f"[merge] {out_dir}: no predictions.p*.jsonl — kept the existing predictions.jsonl unchanged", flush=True)
+        return
     rows = {}
-    for f in sorted(out_dir.glob("predictions.p*.jsonl")):
+    for f in shards:
         for l in f.open():
             try:
                 r = json.loads(l)
