@@ -70,6 +70,15 @@ def main():
         v1.merge(d)
     check("MIXED" not in buf.getvalue(), "merge is quiet when every row has one run_sig")
 
+    # merge on a folder with no shard files must not wipe an existing predictions.jsonl
+    e = Path(_TMP) / "no_shards"
+    e.mkdir()
+    write(e / "predictions.jsonl", [{"_id": "p1"}, {"_id": "p2"}])
+    before = (e / "predictions.jsonl").read_bytes()
+    with redirect_stdout(io.StringIO()):
+        v1.merge(e)
+    check((e / "predictions.jsonl").read_bytes() == before, "merge with no shard files keeps an existing predictions.jsonl")
+
     # F2: shard_left reads each output folder once, not once per case
     calls = {"n": 0}
     real = v1.done_ids
