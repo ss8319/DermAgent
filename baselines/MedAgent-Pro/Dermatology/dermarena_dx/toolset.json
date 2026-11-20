@@ -1,0 +1,33 @@
+[
+ {
+  "id": 1,
+  "type": "Vision Language Model (VLM)",
+  "function": "Make qualitative analysis",
+  "input": "All medical images of the case and the case report text, with optional text from prior steps",
+  "output": "Qualitative analysis or description of certain features, as text"
+ },
+ {
+  "id": 2,
+  "type": "zero-shot classification model",
+  "function": "Measure how strongly the skin image matches the disease in the goal with the DermLIP/PanDerm CLIP model: its zero-shot probability for that disease against the patient's other candidate diseases, and its rank among them",
+  "input": "Clinical or dermoscopic skin image",
+  "output": "JSON: for each image, the probability and rank of the goal disease, with the probabilities of the other candidates",
+  "command": "panderm_classify()"
+ },
+ {
+  "id": 3,
+  "type": "concept annotation model",
+  "function": "Score named visual concepts with the MAKE model; the concept must be named in the step action and be one of: abscess, acuminate, atrophy, black, blue, blue whitish veil, brown(hyperpigmentation), bulla, burrow, comedo, crust, cyst, dome-shaped, dots and globules, erosion, erythema, excoriation, exophytic/fungating, exudate, fissure, flat topped, friable, gray, hair, induration, lichenification, macule, nail, nodule, papule, patch, pedunculated, pigment network, pigmentation, pigmented, pink, plaque, poikiloderma, purple, purpura/petechiae, pustule, red, regression structure, regression structures, salmon, scale, scar, sclerosis, streaks, telangiectasia, translucent, ulcer, umbilicated, vascular structures, vesicle, warty/papillomatous, wheal, white(hypopigmentation), xerosis, yellow",
+  "input": "Clinical or dermoscopic skin image",
+  "output": "JSON: for each image, each named concept with a presence score in [0,1] (above 0.5 = detected)",
+  "command": "make_annotate()"
+ },
+ {
+  "id": 4,
+  "type": "Domain Vision Language Model (VLM)",
+  "function": "Dermatology-specialised vision-language model (DermoGPT): answers a question about what a skin image shows",
+  "input": "Clinical or dermoscopic skin image and a question",
+  "output": "Text answer for each image",
+  "command": "dermogpt_vqa()"
+ }
+]

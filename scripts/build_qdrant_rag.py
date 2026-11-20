@@ -53,7 +53,7 @@ COLLECTION_NAME = "derm_rag"
 EMBEDDING_MODEL = "Qwen/Qwen3-Embedding-8B"
 VECTOR_SIZE = 4096          # Qwen3-Embedding-8B hidden size
 BATCH_SIZE = 4              # Conservative for 8B model; increase if VRAM allows
-USE_4BIT = True             # 4-bit quantization to save ~8GB VRAM
+USE_4BIT = os.environ.get("USE_4BIT", "1") != "0"   # REPRO: env-overridable (set USE_4BIT=0 for fp16, no bitsandbytes)
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 
@@ -168,16 +168,23 @@ def build_rag_index() -> None:
     print("\nLoading embedding model...")
     tokenizer, model = load_model(use_4bit=USE_4BIT)
 
-    # Connect to Qdrant
-    print(f"\nConnecting to Qdrant at {QDRANT_HOST}:{QDRANT_PORT}...")
-    try:
-        client = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT, timeout=120)
-        client.get_collections()
-        print("  Connected.")
-    except Exception as e:
-        print(f"  Error: {e}")
-        print("  Make sure Qdrant is running: docker run -p 6333:6333 qdrant/qdrant")
-        sys.exit(1)
+    # Embedded on-disk Qdrant is opt-in via QDRANT_PATH (no default); writes the
+    # collection to disk for TextRAGTool to read later. If QDRANT_PATH is unset,
+    # connect to the localhost server instead — no silent default mode.
+    _qpath = os.environ.get("QDRANT_PATH")
+    if _qpath:
+        print(f"\nUsing embedded Qdrant at {_qpath} ...")
+        client = QdrantClient(path=_qpath)
+    else:
+        print(f"\nConnecting to Qdrant at {QDRANT_HOST}:{QDRANT_PORT}...")
+        try:
+            client = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT, timeout=120)
+            client.get_collections()
+        except Exception as e:
+            print(f"  Error: {e}")
+            print("  Make sure Qdrant is running: docker run -p 6333:6333 qdrant/qdrant")
+            sys.exit(1)
+    print("  Connected.")
 
     # Recreate collection
     if client.collection_exists(COLLECTION_NAME):

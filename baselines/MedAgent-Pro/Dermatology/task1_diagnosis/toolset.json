@@ -23,14 +23,6 @@
         "command": "make_annotate()"
     },
     {
-        "id": 4,
-        "type": "retrieval model",
-        "function": "Retrieve similar dermatology cases from knowledge base using image similarity",
-        "input": "Dermoscopic or clinical skin image",
-        "output": "JSON with top-k similar cases including their diagnoses and clinical descriptions",
-        "command": "rag_retrieve()"
-    },
-    {
         "id": 5,
         "type": "coding module",
         "function": "Write simple code for aggregating diagnostic indicators or computing metrics"

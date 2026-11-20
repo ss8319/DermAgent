@@ -446,7 +446,7 @@ def main():
                     "`inputs` is a list; each item may be a file path or an "
                     "in-memory object. Handle both gracefully."
                 ),
-                model="chatgpt-4o-latest",
+                model="gpt-4o",
             )
             register_generated_function(data_root, TOOL_FN_REGISTRY, fn_name)
         except Exception as e:

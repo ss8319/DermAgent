@@ -1,0 +1,16 @@
+# 03 A1 arm D: GLM-4.6V. Serving = the ablation arms (10_abl_glm46v_findingskept): tp4, glm45 parser, cuda-graph 128, CTX 131072,
+# DX_EXAMINEE_CONTEXT=131072, 128 workers.
+# 11-17: 80 GB GPUs use the holder default mem-fraction 0.85 (was 0.90, never run on an A100). 0.85 is the setting MEASURED with images
+# on 4xA100-80G (holders/fita100x4 11-01, Dx with images, 128 workers: KV pool 357,519 tokens, KV use mean 0.40 / max 0.87,
+# 0 retractions, 9.7 GB left per GPU); 0.90 would add KV that run did not need and leave ~5.7 GB per GPU for image activations.
+# Weights are not in the Lustre cache: local_weights downloads ~201 GB to node /tmp (3 min on 10-31).
+source /fs04/scratch2/ub62/ssim0070/benchmark_runs/agents/a1_reqs/_a1_common.sh
+if ! a1_done_guard "^DX_MODEL_DONE glm-4.6v-findingskept-img "; then
+MODEL=zai-org/GLM-4.6V
+SERVE_ARGS="--tp-size 4 --reasoning-parser glm45 --cuda-graph-max-bs 128"
+CTX=131072
+source $B0/lock.sh; skip_if_taken glm-4.6v-findingskept-img && return 0
+source $B0/local_weights.sh; local_weights "$MODEL" || return 1
+[ "$MODEL|${CTX:-65536}|${SERVE_ARGS:-}" != "${CUR:-}" ] && bash $B0/clean_gpu.sh
+run() { export DX_EXAMINEE_CONTEXT=131072; bash $B0/tools/guarded.sh "${OPENROUTER_BASE_URL%/v1}/health" bash $B0/dx/run_dx_model_findingskept_img.sh zai-org/GLM-4.6V glm-4.6v-findingskept-img 128; }
+fi

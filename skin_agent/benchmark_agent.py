@@ -22,13 +22,182 @@ from typing import Annotated, Any, Dict, List, Literal, Optional, Tuple, TypedDi
 
 from langchain_core.messages import AnyMessage, AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_openai import ChatOpenAI
+
+
+# Qwen3.5 sometimes writes a COMPLETE tool call inside an unclosed <think> (canaries + full run 11-05: 19 of 24
+# still-broken turns ended with a well-formed <tool_call>...</tool_call>). The server's reasoning parser files it as
+# reasoning, so the tool-call parser never sees it. DERMAGENT_THINK_TOOLCALL_EXTRACT=1 (owner 11-05): when an empty
+# turn's reasoning ENDS with complete qwen3_coder block(s), run exactly those calls (the model's own first decision)
+# instead of re-sampling the turn. Same principle as the base-arm "answer inside reasoning" rule.
+_TC_TAIL = re.compile(r"<tool_call>\s*<function=([^>\s]+)>((?:(?!<tool_call>).)*?)</function>\s*</tool_call>\s*$", re.S)
+_TC_PARAM = re.compile(r"<parameter=([^>\s]+)>\n?(.*?)\n?</parameter>", re.S)
+
+
+def _bound_tool_names(kwargs) -> set:
+    """Tool names bound to THIS LLM call (bind_tools passes them as kwargs['tools']); empty for no-tool nodes."""
+    out = set()
+    for t in kwargs.get("tools") or []:
+        f = (t.get("function") or {}) if isinstance(t, dict) else {}
+        if f.get("name"):
+            out.add(f["name"])
+    return out
+
+
+def _extract_think_toolcalls(msg, allowed=frozenset()) -> bool:
+    """Review fix 11-05: only for calls made with tools bound (chatbot node) and only names of bound tools —
+    never in the no-tool nodes (forced image re-look, cap-final), where an extracted call would dangle unexecuted."""
+    if os.getenv("DERMAGENT_THINK_TOOLCALL_EXTRACT", "0") != "1" or not allowed:
+        return False
+    if (msg.content or "").strip().strip("`").strip() or getattr(msg, "tool_calls", None):
+        return False
+    if msg.response_metadata.get("finish_reason") != "stop":
+        return False
+    rc = msg.additional_kwargs.get("reasoning_content") or ""
+    tail, calls = rc.rstrip(), []
+    while True:
+        m = _TC_TAIL.search(tail)
+        if not m:
+            break
+        args = {}
+        for k, v in _TC_PARAM.findall(m.group(2)):
+            try:
+                args[k] = json.loads(v)
+            except Exception:  # noqa: BLE001 — plain string value (qwen3_coder writes strings unquoted)
+                args[k] = v
+        calls.insert(0, {"name": m.group(1), "args": args, "id": f"call_think_{os.urandom(6).hex()}",
+                         "type": "tool_call"})
+        tail = tail[:m.start()].rstrip()
+    if not calls or any(c["name"] not in allowed for c in calls):
+        return False
+    msg.tool_calls = calls
+    msg.content = ""
+    msg.additional_kwargs["reasoning_content"] = tail
+    msg.response_metadata["toolcall_source"] = "reasoning"
+    msg.response_metadata["n_think_toolcalls"] = len(calls)
+    return True
+
+
+_MM_TOKEN = re.compile(r"<\|(vision_start|vision_end|image_pad|video_pad|vision_pad|object_ref_start|object_ref_end|box_start|box_end)\|>")
+
+
+class _ReasoningChatOpenAI(ChatOpenAI):
+    """ChatOpenAI that keeps the server's `reasoning_content` (SGLang --reasoning-parser) and finish_reason
+    on each AIMessage (additional_kwargs / response_metadata) so per-case traces hold the full thinking.
+    langchain_openai does not send these keys back to the server, so the conversation the model sees is
+    unchanged from plain ChatOpenAI (trace-only, 2026-11-05)."""
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        """Re-issue an immediate-EOS blank (finish=stop, <=2 output tokens, no content, no tool call) up to
+        DERMAGENT_EOS_RETRIES times — the same policy as the base-model arm (dx_infer: such blanks are re-run,
+        never scored). A known Qwen thinking-mode artifact at temperature 1.0; GPT-4o (upstream) has none."""
+        tries = int(os.getenv("DERMAGENT_EOS_RETRIES", "0"))
+        # Qwen3.5's chat template raises "System message must be at the beginning." The upstream Critic injects
+        # its feedback as a mid-conversation SystemMessage (fine for GPT-4o). Send any non-leading system message
+        # as a user message with IDENTICAL content; the leading system prompt is untouched.
+        if os.getenv("DERMAGENT_MIDCONV_SYSTEM_AS_USER", "0") == "1":
+            messages = [HumanMessage(content=m.content) if (i > 0 and isinstance(m, SystemMessage)) else m
+                        for i, m in enumerate(messages)]
+        _allowed = _bound_tool_names(kwargs)
+        res = super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
+        discarded = []
+        for i in range(tries):
+            msg = res.generations[0].message
+            if _extract_think_toolcalls(msg, _allowed):  # complete tool call at the end of the thinking -> run it
+                break
+            out = (getattr(msg, "usage_metadata", None) or {}).get("output_tokens")
+            empty_turn = (not msg.content and not getattr(msg, "tool_calls", None)
+                          and msg.response_metadata.get("finish_reason") == "stop")
+            blank = empty_turn and (out is None or out <= 2)
+            # Tool calls written INSIDE an unclosed <think>: the reasoning parser files them as reasoning, the
+            # tool-call parser never sees them -> an empty turn that would end the case. A serving/format failure
+            # of the call, not an answer -> re-issued too (DERMAGENT_REISSUE_THINK_TOOLCALL=0 disables).
+            _rc = msg.additional_kwargs.get("reasoning_content") or ""
+            think_tc = (empty_turn and os.getenv("DERMAGENT_REISSUE_THINK_TOOLCALL", "1") == "1"
+                        and "<tool_call>" in _rc)
+            # Interrupted step (canaries 060/061): the model stopped inside an unclosed <think> while planning
+            # ("Let me make targeted calls:") -> no tool call, no FINAL_ANSWER: a failed call, not an answer.
+            interrupted = (empty_turn and not blank and not think_tc and "FINAL_ANSWER" not in _rc
+                           and os.getenv("DERMAGENT_REISSUE_INTERRUPTED", "0") == "1")
+            if not (blank or think_tc or interrupted):
+                break
+            discarded.append({"reason": "eos_blank" if blank else "toolcall_in_think" if think_tc else "interrupted_in_think",
+                              "content": msg.content, "reasoning_content": _rc,
+                              "output_tokens": out})
+            res = super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
+            res.generations[0].message.response_metadata["reissues"] = i + 1
+            res.generations[0].message.response_metadata["reissue_discarded"] = list(discarded)
+            res.generations[0].message.response_metadata["reissue_reason"] = (
+                "eos_blank" if blank else "toolcall_in_think" if think_tc else "interrupted_in_think")
+        _extract_think_toolcalls(res.generations[0].message, _allowed)  # also after the last re-issue (idempotent)
+        # Base-arm answer rule (DermArena llm_client._answer_from): content blank + finish=stop + reasoning > 20 chars
+        # -> the reasoning IS the answer (Qwen3.5 via SGLang sometimes never closes </think>). Only for a turn with
+        # no tool call and no stray <tool_call> in the reasoning. DERMAGENT_REASONING_FALLBACK=1 enables.
+        if os.getenv("DERMAGENT_REASONING_FALLBACK", "0") == "1":
+            msg = res.generations[0].message
+            rc = msg.additional_kwargs.get("reasoning_content") or ""
+            if (not (msg.content or "").strip().strip("`").strip() and not getattr(msg, "tool_calls", None)
+                    and msg.response_metadata.get("finish_reason") == "stop"
+                    and len(rc.strip()) > 20 and "<tool_call>" not in rc
+                    and (os.getenv("DERMAGENT_REISSUE_INTERRUPTED", "0") != "1" or "FINAL_ANSWER" in rc)):
+                msg.content = rc
+                msg.response_metadata["answer_source"] = "reasoning"
+        return res
+
+    def _get_request_payload(self, input_, *, stop=None, **kwargs):
+        """Qwen3.5 creator setup for agents: send each assistant step's reasoning_content back, so the model's own
+        chat template renders <think>...</think> for the steps of the ongoing tool loop (after the last user
+        message) and drops it for earlier turns ("No Thinking Content in History", Qwen3.5 card). Plain
+        langchain_openai drops reasoning_content, so every prior tool step showed an EMPTY <think></think>.
+        DERMAGENT_PASS_REASONING=1 enables (SGLang accepts assistant reasoning_content; verified 2026-11-05)."""
+        payload = super()._get_request_payload(input_, stop=stop, **kwargs)
+        if os.getenv("DERMAGENT_PASS_REASONING", "0") == "1" and isinstance(payload.get("messages"), list):
+            msgs = self._convert_input(input_).to_messages()
+            if len(msgs) == len(payload["messages"]):
+                for m, d in zip(msgs, payload["messages"]):
+                    rc = (getattr(m, "additional_kwargs", None) or {}).get("reasoning_content")
+                    if isinstance(m, AIMessage) and rc and d.get("role") == "assistant":
+                        d["reasoning_content"] = rc
+        # Qwen3.8-Flash-Next (SGLang 0.5.22): a LITERAL multimodal placeholder string in the text of any message
+        # ("<|image_pad|>", "<|vision_start|>" ...) is counted as an extra image token -> HTTP 500 "More 'IMAGE' tokens
+        # found than corresponding data provided", deterministic for every later call of that case (verified 11-06
+        # 01:50: assistant text / tool-style text / user text all fail; 1 of 33 canary cases lost to it). Replace the
+        # string with a visible, harmless "[image_pad]" in TEXT only (image parts are untouched).
+        if os.getenv("DERMAGENT_SANITIZE_SPECIAL_TOKENS", "0") == "1" and isinstance(payload.get("messages"), list):
+            for d in payload["messages"]:
+                for key in ("content", "reasoning_content"):
+                    v = d.get(key)
+                    if isinstance(v, str):
+                        d[key] = _MM_TOKEN.sub(lambda m: "[" + m.group(1) + "]", v)
+                    elif isinstance(v, list):
+                        for part in v:
+                            if isinstance(part, dict) and part.get("type") == "text" and isinstance(part.get("text"), str):
+                                part["text"] = _MM_TOKEN.sub(lambda m: "[" + m.group(1) + "]", part["text"])
+        return payload
+
+    def _create_chat_result(self, response, generation_info=None):
+        result = super()._create_chat_result(response, generation_info)
+        try:
+            d = response if isinstance(response, dict) else response.model_dump()
+            for gen, ch in zip(result.generations, d.get("choices") or []):
+                msg = ch.get("message") or {}
+                rc = msg.get("reasoning_content")
+                if rc:
+                    gen.message.additional_kwargs["reasoning_content"] = rc
+                if ch.get("finish_reason"):
+                    gen.message.response_metadata.setdefault("finish_reason", ch["finish_reason"])
+            if d.get("usage"):
+                for gen in result.generations:
+                    gen.message.response_metadata.setdefault("usage_raw", d["usage"])
+        except Exception:  # noqa: BLE001 — tracing must never break a call
+            pass
+        return result
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, StateGraph
 from langgraph.prebuilt import ToolNode
 
 import time
 
-from .tools import MAKETool, PanDermTool, DermoGPTTool, RAGTool, TextRAGTool, OntologyTool, preload_tools_sequential, tool_timing_registry, ToolMemoryManager
+from .tools import MAKETool, PanDermTool, DermoGPTTool, Qwen3VLTool, RAGTool, TextRAGTool, OntologyTool, preload_tools_sequential, tool_timing_registry, ToolMemoryManager
 from .tracing import AgentTrace, TraceLogger, ToolCall, AgentStep, CriticRetryStep
 from .utils.retry import with_rate_limit_retry
 from .utils.image_utils import generate_image_id, register_image_path
@@ -62,6 +231,11 @@ MODEL_ALIASES = {
     "o1": "o1",
     "o1-mini": "o1-mini",
     "o1-preview": "o1-preview",
+    # Local SGLang-served backbone (set OPENAI_BASE_URL to the local Qwen3.5-27B
+    # SGLang endpoint, e.g. http://m3h111:30005/v1). Rule-1 caveat: backbone
+    # temperature is hard-coded to 0.1 below for reproducibility — deviates
+    # from Qwen3.5-27B's official thinking_general preset (T=1.0).
+    "Qwen/Qwen3.5-27B": "Qwen/Qwen3.5-27B",
 }
 
 def resolve_model_name(model_name: str) -> str:
@@ -892,10 +1066,75 @@ ABLATION_PROMPTS_BY_TASK = {
 # Task Configuration
 # =============================================================================
 
+OPEN_SET_DX_SYSTEM_PROMPT = """You are DermAgent, an expert dermatology AI performing skin disease diagnosis.
+
+Goal: integrate the case information and any attached image(s) and table(s) to produce a ranked TOP-5 differential diagnosis, always with the most likely diagnosis first. The answer is FREE TEXT — there is NO fixed list of options.
+
+You MAY call specialist tools to gather evidence. You decide entirely whether, when, and on which image to use each one — look at each attached image and judge for yourself:
+- panderm_classifier: zero-shot skin-disease classifier. It needs a candidate list, so YOU propose candidate diagnoses (comma-separated) and it ranks them on the image id you choose.
+- make_concept_annotator: extracts dermatological visual concepts from an image.
+- dermogpt_vqa / qwen_vqa: visual question answering about an image.
+- rag_retrieval: retrieves visually-similar diagnosed cases (pass image_path only); their diagnoses are candidate evidence.
+- text_rag_retrieval: retrieves clinical-guideline text (pass a query).
+- ontology_query: disease-hierarchy / taxonomy lookup.
+
+Notes:
+- Pass the image id (given in the user message) as image_path when calling an image tool.
+- Use tools to CORROBORATE; the final differential is YOUR synthesis of the case + image(s) + any tool evidence.
+- Do not restrict yourself to any list, and do not invent diseases not supported by the case.
+
+When you are done gathering evidence, write a brief synthesis and end your message with exactly this block:
+FINAL_ANSWER:
+1. <most likely diagnosis>
+2. <second>
+3. <third>
+4. <fourth>
+5. <fifth>"""
+
+
+# -----------------------------------------------------------------------------
+# Open-set version of the upstream full-tool diagnosis prompt (DermArena v1 paper run, 2026-11-05).
+# Derived from DIAGNOSIS_SYSTEM_PROMPT_DERMOGPT_FULL (the prompt upstream's headline Dx run uses) by the
+# minimal edits below, each asserted to apply exactly once: the closed-set lines (fixed option list, one
+# label) become open-set (agent-proposed candidates, ranked top-5); everything else is upstream verbatim.
+# Selected with DERMAGENT_OPEN_PROMPT=upstream_full; unset keeps OPEN_SET_DX_SYSTEM_PROMPT (earlier runs).
+# -----------------------------------------------------------------------------
+_OPEN_SET_EDITS = [
+    ("   - IMPORTANT: Pass the exact candidate_diseases list from the task options (comma-separated string)",
+     "   - IMPORTANT: Pass exactly 10 candidate diagnoses: your top-10 differential for this case (comma-separated string)"),
+    ("   - For DIAGNOSIS: Pass candidate_diseases to get",
+     "   - For DIAGNOSIS: Pass the same 10 candidate diagnoses as candidate_diseases to get"),
+    ("## Your Task\nClassify the skin lesion into ONE of the provided diagnostic categories.",
+     "## Your Task\nRead the patient case and the attached image(s), then give the TOP-5 most likely diagnoses "
+     "in ranked order (most likely first). The answer is free text: there is NO fixed list of options.\n"
+     "The image tools accept clinical photographs and dermoscopy only: those images have an id (listed in the "
+     "user message); pass that id as image_path when calling an image tool, and choose which image(s) to analyse."),
+    ("panderm_classifier (with exact candidate_diseases)",
+     "panderm_classifier (with your top-10 candidate diagnoses)"),
+    ("FINAL_ANSWER: [exact diagnosis name from options]",
+     "FINAL_ANSWER:\n1. <most likely diagnosis>\n2. <second>\n3. <third>\n4. <fourth>\n5. <fifth>"),
+    ("- ALWAYS pass the exact candidate_diseases to panderm_classifier",
+     "- ALWAYS pass exactly 10 candidate diagnoses (your top-10 differential) to panderm_classifier"),
+    ("- Your final answer MUST be one of the provided options exactly\n", ""),
+]
+
+
+def _derive_open_set_full_prompt() -> str:
+    p = DIAGNOSIS_SYSTEM_PROMPT_DERMOGPT_FULL
+    for old, new in _OPEN_SET_EDITS:
+        assert p.count(old) == 1, f"open-set prompt edit no longer matches upstream text: {old[:60]!r}"
+        p = p.replace(old, new)
+    return p
+
+
+OPEN_SET_DX_SYSTEM_PROMPT_UPSTREAM_FULL = _derive_open_set_full_prompt()
+
+
 TASK_PROMPTS = {
     "diagnosis": DIAGNOSIS_SYSTEM_PROMPT,
     "concept": CONCEPT_SYSTEM_PROMPT,
     "captioning": CAPTIONING_SYSTEM_PROMPT,
+    "open_diagnosis": OPEN_SET_DX_SYSTEM_PROMPT,
 }
 
 # DATASET_CONFIGS is imported from .configs to avoid circular imports
@@ -929,6 +1168,8 @@ class BenchmarkAgentState(TypedDict):
     text_rag_queries: List[str]  # List of all text_rag queries made
     # Narrowed re-diagnosis (Task 1 diagnosis critic only)
     narrowed_candidates: Optional[List[str]]  # Critic-generated shortlist for focused re-diagnosis
+    # Open-set multi-image (DermArena): all clinical/dermoscopy images, re-shown on critic retry
+    reinject_images: Optional[List[str]]
 
 
 # =============================================================================
@@ -1565,6 +1806,7 @@ def create_tools(
     use_flash_attn: bool = False,
     preload: bool = True,
     qdrant_path: str = "./qdrant_storage",
+    qwen_model_id: str = "Qwen/Qwen3-VL-8B-Instruct",
 ) -> List:
     """
     Create and initialize dermatology tools.
@@ -1589,7 +1831,23 @@ def create_tools(
     # Enable all tools by default
     if enabled_tools is None:
         enabled_tools = ["panderm", "make", "rag"]
-    
+
+    # Guard against a Qdrant embedded-mode lock collision. RAGTool and TextRAGTool
+    # both read embedded-mode storage dirs via env: RAGTool from QDRANT_PATH, and
+    # TextRAGTool from QDRANT_TEXT_PATH (falling back to QDRANT_PATH). qdrant-
+    # client takes an exclusive lock on the directory in path mode, so if both
+    # tools end up resolving to the SAME dir, the second loader crashes. Allow
+    # both tools when distinct dirs are configured.
+    if "rag" in enabled_tools and "text_rag" in enabled_tools:
+        _rag_p  = os.environ.get("QDRANT_PATH")
+        _text_p = os.environ.get("QDRANT_TEXT_PATH") or _rag_p
+        if _rag_p and _text_p and os.path.abspath(_rag_p) == os.path.abspath(_text_p):
+            raise ValueError(
+                "rag and text_rag would share the same Qdrant path "
+                f"({os.path.abspath(_rag_p)}) — exclusive lock collision. "
+                "Set QDRANT_TEXT_PATH to a different directory than QDRANT_PATH."
+            )
+
     tools = []
     dermogpt_tool = None
     
@@ -1606,7 +1864,16 @@ def create_tools(
         print(f"[Tool Creation] Creating DermoGPTTool (flash_attn={use_flash_attn})...")
         dermogpt_tool = DermoGPTTool(device=device, use_flash_attn=use_flash_attn)
         tools.append(dermogpt_tool)
-    
+
+    # REPRO PATCH: wire Qwen3-VL as an agent tool. The Qwen3VLTool class shipped
+    # in skin_tools.py (name="qwen_vqa") but create_tools() had no branch to
+    # instantiate it (and the runners passed an unsupported qwen_model_id kwarg).
+    # This closes the paper-vs-code gap so the agent can use Qwen3-VL as its
+    # general VLM alongside DermoGPT.
+    if "qwen_vqa" in enabled_tools:
+        print(f"[Tool Creation] Creating Qwen3VLTool (model={qwen_model_id}, flash_attn={use_flash_attn})...")
+        tools.append(Qwen3VLTool(device=device, model_id=qwen_model_id, use_flash_attn=use_flash_attn))
+
     if "rag" in enabled_tools:
         print("[Tool Creation] Creating RAGTool (multimodal: image + text)...")
         rag_tool = RAGTool(device=device)
@@ -1826,11 +2093,23 @@ def create_benchmark_agent(
     print(f"[BenchmarkAgent] Using LLM: {resolved_model_name}")
     
     # Initialize LLM with low temperature
+    # max_tokens caps per-call generation so reasoning-mode Qwen can't run away
+    # (observed 105k-token single-call runaway at 128k context with no cap → stalls
+    # the whole run). Env-tunable; 8192 covers normal reasoning + the 5-item answer.
     llm_kwargs = {
         "model": resolved_model_name,
         "temperature": 0.1,
+        "max_tokens": int(os.getenv("DERMAGENT_MAX_TOKENS", "8192")),
     }
-    
+    # DermArena v1 paper run (2026-11-05): the backbone uses its creator's sampling, identical to the
+    # base-model arm (eval/sampling_profiles.py), e.g.
+    #   DERMAGENT_SAMPLING_JSON='{"temperature":1.0,"top_p":0.95,"presence_penalty":1.5,
+    #                             "extra_body":{"top_k":20,"min_p":0.0,"repetition_penalty":1.0}}'
+    # Unset = the original DermAgent setting above (temperature 0.1).
+    _samp = os.getenv("DERMAGENT_SAMPLING_JSON")
+    if _samp:
+        llm_kwargs.update(json.loads(_samp))
+
     if api_key:
         llm_kwargs["api_key"] = api_key
     elif os.getenv("OPENAI_API_KEY"):
@@ -1841,7 +2120,7 @@ def create_benchmark_agent(
     elif os.getenv("OPENAI_BASE_URL"):
         llm_kwargs["base_url"] = os.getenv("OPENAI_BASE_URL")
     
-    llm = ChatOpenAI(**llm_kwargs)
+    llm = _ReasoningChatOpenAI(**llm_kwargs)
     llm_with_tools = llm.bind_tools(tools)
     
     # =========================================================================
@@ -1929,6 +2208,8 @@ def create_benchmark_agent(
                     system_prompt = CAPTIONING_SYSTEM_PROMPT_WITH_ONTOLOGY
                 else:
                     system_prompt = TASK_PROMPTS.get(task_type, DIAGNOSIS_SYSTEM_PROMPT)
+            elif task_type == "open_diagnosis" and os.getenv("DERMAGENT_OPEN_PROMPT") == "upstream_full":
+                system_prompt = OPEN_SET_DX_SYSTEM_PROMPT_UPSTREAM_FULL
             else:
                 system_prompt = TASK_PROMPTS.get(task_type, DIAGNOSIS_SYSTEM_PROMPT)
 
@@ -2035,6 +2316,8 @@ Round 1 tools identified these as the most likely candidates:
             if current_count + num_new_calls > max_tool_calls:
                 print(f"[WARNING] Max tool calls limit ({max_tool_calls}) reached. "
                       f"Current: {current_count}, Requested: {num_new_calls}. Stopping agent.")
+                # Upstream: "__end__" routes to the critic (which may still retry). DERMAGENT_CAP_FINAL only acts
+                # where the graph would otherwise END with these calls unanswered (should_continue_after_critic).
                 return "__end__"
             
             return "tools"
@@ -2561,6 +2844,36 @@ Round 1 tools identified these as the most likely candidates:
                     len(candidate_pool),
                 )
 
+        # Open-set port of the shortlist above (DermArena, owner 2026-11-05): same 3 sources (PanDerm predictions
+        # with non-zero confidence, Case-RAG top-2 labels, DermoGPT diagnosis) but (a) names kept as the tools
+        # wrote them (no option list to match to) and (b) pooled over ALL calls of each tool (one per image),
+        # since tool_outputs above keeps only each tool's last call. Gates above are unchanged (last call).
+        if (task_type == "open_diagnosis" and narrowed_diseases is None
+                and os.getenv("DERMAGENT_OPEN_SHORTLIST", "0") == "1"):
+            _invalid = {"no definitive diagnosis", "no diagnosis", "unknown", "n/a", "none", "uncertain",
+                        "unspecified", "not specified", "no label", "other"}
+            pool: Dict[str, str] = {}
+            for msg in messages:
+                if not isinstance(msg, ToolMessage):
+                    continue
+                name = getattr(msg, "name", None)
+                out = msg.content if isinstance(msg.content, str) else str(msg.content)
+                if not name or _check_tool_returned_error({name: out}, name):
+                    continue
+                names: List[str] = []
+                if name == "panderm_classifier":
+                    names = [d for d, _sc in ToolOutputParser.extract_all_panderm_predictions(out)]
+                elif name == "rag_retrieval":
+                    names = ToolOutputParser.extract_all_diagnoses_from_rag(out)[:2]
+                elif name == "dermogpt_vqa":
+                    d = ToolOutputParser.extract_dermogpt_diagnosis(out)
+                    names = [d] if d else []
+                for d in names:
+                    if d and d.strip() and d.strip().lower() not in _invalid:
+                        pool.setdefault(d.strip().lower(), d.strip())
+            if len(pool) >= 2:
+                narrowed_diseases = list(pool.values())
+
         # =====================================================================
         # Decision: Retry or Pass
         # =====================================================================
@@ -2623,6 +2936,11 @@ Round 1 tools identified these as the most likely candidates:
         feedback = state.get("last_critic_feedback")
         if feedback:
             return "chatbot"
+        # DermArena v1 (owner 2026-11-05, option A): the run would end on a tool batch the cap refused (no answer)
+        # -> one forced no-tool turn asks for FINAL_ANSWER. Upstream flow (critic retries) is unchanged before this.
+        last = (state.get("messages") or [None])[-1]
+        if os.getenv("DERMAGENT_CAP_FINAL", "0") == "1" and getattr(last, "tool_calls", None):
+            return "cap_final"
         return "__end__"
 
     def inject_critic_feedback(state: BenchmarkAgentState) -> Dict[str, Any]:
@@ -2653,7 +2971,9 @@ Round 1 tools identified these as the most likely candidates:
         narrowed = state.get("narrowed_candidates")
         task_type = state.get("task_type", "diagnosis")
 
-        if task_type == "diagnosis" and narrowed and retry_count <= 1:
+        _dx_tasks = (("diagnosis", "open_diagnosis") if os.getenv("DERMAGENT_OPEN_SHORTLIST", "0") == "1"
+                     else ("diagnosis",))
+        if task_type in _dx_tasks and narrowed and retry_count <= 1:
             # Diagnosis narrowed re-diagnosis: prescriptive instructions
             logger.info(
                 "[NarrowedDx] Injecting focused re-diagnosis feedback "
@@ -2682,7 +3002,7 @@ Round 1 tools identified these as the most likely candidates:
                 "Synthesize Round 1 evidence + Round 2 results to provide "
                 "a definitive FINAL_ANSWER."
             )
-        elif task_type == "diagnosis" and retry_count > 1:
+        elif task_type in _dx_tasks and retry_count > 1:
             # Diagnosis final attempt
             retry_instruction = (
                 "**Instructions (Final Attempt):**\n"
@@ -2739,7 +3059,23 @@ Round 1 tools identified these as the most likely candidates:
         # === Optionally add HumanMessage with image (only on first critic retry) ===
         image_was_reinjected = False
         already_reinjected = state.get("image_reinject_count", 0) > 0
-        if critic_image_reinject and current_image and Path(current_image).exists() and not already_reinjected:
+        _reinject_all = [p for p in (state.get("reinject_images") or []) if p and Path(p).exists()]
+        if (critic_image_reinject and not already_reinjected and task_type == "open_diagnosis"
+                and os.getenv("DERMAGENT_REINJECT_ALL_DERM", "0") == "1" and _reinject_all):
+            # Open-set multi-image: re-show ALL the case's clinical/dermoscopy images (upstream re-shows its one
+            # image); the backbone already holds the full case, hence "this case and these images".
+            _mt = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".gif": "image/gif"}
+            human_content = []
+            for _p in _reinject_all:
+                with open(_p, "rb") as f:
+                    _b64 = base64.b64encode(f.read()).decode("utf-8")
+                human_content.append({"type": "image_url", "image_url": {
+                    "url": f"data:{_mt.get(Path(_p).suffix.lower(), 'image/jpeg')};base64,{_b64}"}})
+            human_content.append({"type": "text",
+                                  "text": "Re-analyze this case and these images based on the critic feedback above."})
+            result_messages.append(HumanMessage(content=human_content))
+            image_was_reinjected = True
+        elif critic_image_reinject and current_image and Path(current_image).exists() and not already_reinjected:
             with open(current_image, "rb") as f:
                 b64_image = base64.b64encode(f.read()).decode("utf-8")
             suffix = Path(current_image).suffix.lower()
@@ -2815,6 +3151,16 @@ Be specific and reference visual evidence from the image. After this analysis, y
                 output_tokens=usage.get('completion_tokens') or usage.get('output_tokens'),
             )
         
+        # Tools are OFF in this node. Flash-Next (11-06) writes complete <tool_call> blocks as plain text here; they
+        # never run, yet the next (tools-bound) turn believes they were issued, says "awaiting results" and emits no
+        # call -> the case ends unanswered (41/41 T1.1 traces). DERMAGENT_STRIP_NOTOOL_TOOLCALLS=1 removes the markup
+        # from the stored reply (the image description is kept; the raw text is saved in response_metadata).
+        if os.getenv("DERMAGENT_STRIP_NOTOOL_TOOLCALLS", "0") == "1" and isinstance(response.content, str) \
+                and "<tool_call>" in response.content:
+            raw = response.content
+            clean = re.sub(r"<tool_call>.*?(?:</tool_call>|$)", "", raw, flags=re.S).rstrip()
+            response.response_metadata["stripped_notool_toolcalls"] = {"n": raw.count("<tool_call>"), "raw": raw}
+            response.content = clean
         return {"messages": [response]}
     
     def should_analyze_image(state: BenchmarkAgentState) -> Literal["analyze_image", "chatbot"]:
@@ -2837,6 +3183,34 @@ Be specific and reference visual evidence from the image. After this analysis, y
                         return "analyze_image"
         return "chatbot"
 
+    def cap_final_answer(state: BenchmarkAgentState) -> Dict[str, Any]:
+        """Tool-call budget reached (DERMAGENT_CAP_FINAL=1): answer the pending calls with a 'not executed'
+        ToolMessage (keeps the conversation valid), then one LLM turn WITHOUT tools asking for FINAL_ANSWER.
+        Ends the graph afterwards (the critic would only ask for more tools)."""
+        messages = state["messages"]
+        last = messages[-1]
+        skipped = [ToolMessage(content=f"Not executed: the tool-call budget ({max_tool_calls} calls) is used up.",
+                               tool_call_id=tc.get("id") or f"cap_{i}", name=tc.get("name"))
+                   for i, tc in enumerate(getattr(last, "tool_calls", None) or [])]
+        if state.get("task_type") == "open_diagnosis":
+            fmt = "FINAL_ANSWER:\n1. <most likely diagnosis>\n2. <second>\n3. <third>\n4. <fourth>\n5. <fifth>"
+        else:
+            fmt = "FINAL_ANSWER: <your answer>"
+        instr = HumanMessage(content=(
+            f"The tool-call budget ({max_tool_calls} calls) is used up: no more tools can be called. "
+            f"Based on all the evidence above, give your final answer now in this format:\n{fmt}"))
+        start_time = time.perf_counter()
+        response = with_rate_limit_retry(llm.invoke, messages + skipped + [instr])
+        duration_ms = (time.perf_counter() - start_time) * 1000
+        response.response_metadata["cap_final"] = True
+        if profiler.is_enabled():
+            usage = (getattr(response, "response_metadata", {}) or {}).get("token_usage", {}) or \
+                (getattr(response, "usage_metadata", None) or {})
+            profiler.record_llm_call(duration_ms=duration_ms,
+                                     input_tokens=usage.get("prompt_tokens") or usage.get("input_tokens"),
+                                     output_tokens=usage.get("completion_tokens") or usage.get("output_tokens"))
+        return {"messages": skipped + [instr, response]}
+
     # Build graph with critic node
     workflow = StateGraph(BenchmarkAgentState)
     workflow.add_node("chatbot", chatbot)
@@ -2844,6 +3218,7 @@ Be specific and reference visual evidence from the image. After this analysis, y
     workflow.add_node("critic", critic_node)
     workflow.add_node("inject_feedback", inject_critic_feedback)
     workflow.add_node("analyze_reinjected_image", analyze_reinjected_image)
+    workflow.add_node("cap_final", cap_final_answer)
 
     workflow.set_entry_point("chatbot")
 
@@ -2853,6 +3228,7 @@ Be specific and reference visual evidence from the image. After this analysis, y
         should_continue,
         {"tools": "tools", "__end__": "critic"}  # Changed: go to critic instead of END
     )
+    workflow.add_edge("cap_final", END)
 
     # tools → chatbot (continue reasoning with tool results)
     workflow.add_edge("tools", "chatbot")
@@ -2861,7 +3237,7 @@ Be specific and reference visual evidence from the image. After this analysis, y
     workflow.add_conditional_edges(
         "critic",
         should_continue_after_critic,
-        {"chatbot": "inject_feedback", "__end__": END}
+        {"chatbot": "inject_feedback", "__end__": END, "cap_final": "cap_final"}
     )
 
     # inject_feedback → analyze_image (if image reinjected) or chatbot (if not)
@@ -3085,6 +3461,132 @@ End with FINAL_ANSWER: [your complete caption]"""
             "trace": trace,
         }
     
+    def run_open_diagnosis(
+        self,
+        case_text: str,
+        image_paths: List[str],
+        instruction: str,
+        case_id: str = "",
+        image_modalities: Optional[List[str]] = None,
+        tool_usable: Optional[List[bool]] = None,
+    ) -> Dict[str, Any]:
+        """Open-set, multi-image mode (for DermArena-style cases).
+
+        Attaches ALL images to the multimodal backbone, offers the full tool set,
+        and lets the LLM autonomously decide which tools to call on which image.
+        Returns the agent's free-text response (expected to end with a top-5
+        FINAL_ANSWER block). No closed-set options, no answer parsing.
+        """
+        import base64
+        from pathlib import Path
+
+        media_types = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
+                       ".gif": "image/gif", ".webp": "image/webp", ".bmp": "image/bmp"}
+        # DERMAGENT_ATTACH_IMAGES=0 = upstream behaviour (BenchmarkRunner.include_image_in_message=False, the
+        # default of the headline runs): the backbone gets image IDs only; tools (and the Critic's image
+        # re-injection) see the pixels. =1 = earlier open-set mode (all images attached to the backbone).
+        attach = os.getenv("DERMAGENT_ATTACH_IMAGES", "1") == "1"
+        content = []
+        id_lines = []
+        img_ids = []
+        usable_paths = []
+        for i, p in enumerate(image_paths or [], 1):
+            if not p or not Path(p).exists():
+                continue
+            usable = True if tool_usable is None else bool(tool_usable[i - 1])
+            if attach:
+                with open(p, "rb") as f:
+                    b64 = base64.b64encode(f.read()).decode("utf-8")
+                mt = media_types.get(Path(p).suffix.lower(), "image/jpeg")
+                content.append({"type": "image_url", "image_url": {"url": f"data:{mt};base64,{b64}"}})
+            mod_txt = (image_modalities[i - 1] or "").replace("_", " ") if image_modalities and i - 1 < len(image_modalities) else ""
+            if not usable:
+                # owner 2026-11-05: the image tools handle clinical photos / dermoscopy only. The backbone still
+                # sees this image (attached above, like the base arm) but it gets no tool id.
+                line = f"image {i} ({mod_txt or 'other image'}): not available to the image tools"
+                img_ids.append(line)
+                id_lines.append(f"  {line}")
+                continue
+            img_id = generate_image_id(p)
+            register_image_path(img_id, p)
+            usable_paths.append(p)
+            # DERMAGENT_IMAGE_MODALITY_TAGS=1: tag each ID with its image type from the benchmark metadata
+            # (e.g. "IMG_x (histopathology)") so a backbone that sees IDs only can route tools; off = upstream.
+            # ID LAST on the line ("image 3 (dermoscopy): IMG_9b07e4aa") so the backbone copies a clean ID; a tag
+            # after the ID ("IMG_x (dermoscopy)") would be copied along and fail the registry lookup.
+            tag = (f" ({mod_txt})" if os.getenv("DERMAGENT_IMAGE_MODALITY_TAGS") == "1" and mod_txt else "")
+            img_ids.append(f"image {i}{tag}: {img_id}" if tool_usable is not None else img_id)
+            id_lines.append(f"  image {i}{tag}: id={img_id}")
+        n_attached = sum(1 for c in content if c.get("type") == "image_url")
+
+        if os.getenv("DERMAGENT_USER_MSG") == "upstream":
+            # Upstream run_diagnosis user message, closed-set lines made open-set; the case text gets its own
+            # section (the DermArena input). Upstream: "## Task\nDiagnose the skin lesion in this image.\n## Image\n
+            # {image_id}\n## Instructions\nUse panderm_classifier with dataset=..., cross-validate with other tools
+            # (rag_retrieval, make_concept_annotator), \nthen provide FINAL_ANSWER with one of the diagnostic options."
+            img_list = "\n".join(img_ids) if img_ids else "(no images for this case)"
+            user_message = (
+                "## Task\nDiagnose the patient in this case.\n"
+                f"## Image\n{img_list}\n"
+                f"## Case\n{case_text}\n"
+                "## Instructions\nUse panderm_classifier with your top-10 candidate diagnoses, cross-validate with other "
+                "tools (rag_retrieval, make_concept_annotator), \nthen provide FINAL_ANSWER with your top 5 "
+                "diagnoses, ranked."
+            )
+        else:
+            img_block = ("Attached images (pass the id as image_path when calling an image tool):\n"
+                         + "\n".join(id_lines)) if id_lines else "(no images available for this case)"
+            user_message = f"{instruction}\n\n{img_block}\n\n## Case\n{case_text}"
+        content.append({"type": "text", "text": user_message})
+        messages = [HumanMessage(content=content if n_attached else user_message)]
+
+        input_state = {
+            "messages": messages,
+            # Critic image re-injection uses the first tool-usable (clinical / dermoscopy) image, as upstream's
+            # single derm image; falls back to the first image.
+            "current_image": (usable_paths[0] if usable_paths else (image_paths[0] if image_paths else None)),
+            "reinject_images": usable_paths,
+            "task_type": "open_diagnosis",
+            "dataset": None,
+            "options": None,
+            "tool_call_count": 0,
+            "critic_retry_count": 0,
+            "tools_called": [],
+            "last_critic_feedback": None,
+            "evidence_summaries": [],
+            "image_reinject_count": 0,
+            "tool_call_cache": {},
+            "text_rag_queries": [],
+        }
+        config = {
+            "configurable": {"thread_id": f"open_{case_id or abs(hash(str(image_paths)))}"},
+            "recursion_limit": self.recursion_limit,
+            "tags": ["open_diagnosis", self.model_name],
+            "metadata": {"task_type": "open_diagnosis", "model": self.model_name,
+                         "enabled_tools": ",".join(t.name for t in self.tools)},
+            "run_name": "open_diagnosis",
+        }
+        result = with_rate_limit_retry(self.agent.invoke, input_state, config=config)
+
+        tools_used = [m.name for m in result["messages"] if isinstance(m, ToolMessage)
+                      and not str(m.content).startswith("Not executed: the tool-call budget")]
+        final = ""
+        for m in reversed(result["messages"]):
+            if isinstance(m, AIMessage) and not getattr(m, "tool_calls", None) and m.content:
+                final = m.content if isinstance(m.content, str) else str(m.content)
+                break
+        # Normalise markdown-heading variant the model occasionally emits:
+        # "## FINAL ANSWER:" → "FINAL_ANSWER:" (space→underscore, strip ##)
+        import re as _re
+        final = _re.sub(r'##\s*FINAL\s+ANSWER\s*:', 'FINAL_ANSWER:', final)
+        return {
+            "response": final,
+            "vision_used": n_attached > 0,
+            "n_images": n_attached,
+            "tools_used": tools_used,
+            "messages": result["messages"],
+        }
+
     def _run(
         self,
         task_type: str,

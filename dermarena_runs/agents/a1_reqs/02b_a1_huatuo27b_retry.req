@@ -1,0 +1,26 @@
+# 02b (11-17) automatic retry for 02_a1_huatuo27b.req. Acts ONLY if the HuatuoGPT-3-27B arm D is still unfinished after 02 and 02 did
+# not stop at a gate (canary failed / input refused: those need a person; the gate is never lowered). Why: 02 serves at mem-fraction
+# 0.90 + cuda-graph 40, measured on the A100 for the TEXT-ONLY arms (7.0 GB left per GPU, holders/abl_a100); arm D also sends images.
+# If that server dies (out of memory), this request restarts it with the setting measured WITH images on an 80 GB A100 for the same
+# architecture (Qwen3.5-27B Dx, holders/fita100x1h 11-03: mem-fraction 0.85 = holder default, cuda-graph 24, 11.0 GB left per GPU,
+# 17 running per replica) and resumes: finished rows are kept. H200: the same settings as 02 (a plain retry).
+# Otherwise a no-op that keeps the current server (no reload).
+source /fs04/scratch2/ub62/ssim0070/benchmark_runs/agents/a1_reqs/_a1_common.sh
+A1_SLUG=huatuogpt-3-27b-findingskept-img
+if grep -qs "^DX_MODEL_DONE $A1_SLUG " $B0/holders/*/out/runs.log || grep -qsE "(CANARY FAILED|INFER REFUSED).* stopping $A1_SLUG\$" $OUT/runs.log; then
+  echo "[a1] 02b: nothing to retry for $A1_SLUG (finished, or stopped at a gate) $(date)"
+  IFS='|' read -r MODEL CTX SERVE_ARGS <<< "${CUR:-}"; run() { :; }
+else
+  echo "[a1] 02b: $A1_SLUG not finished after 02: retrying $(date)"
+  echo "$(date '+%m-%d %H:%M') A1 ${NAME:-?} ${SLURM_JOB_ID:-?}: 02 HuatuoGPT-3-27B did not finish; 02b retry started (80 GB GPUs: mem-fraction 0.85, cuda-graph 24)" >> $B0/logs/gpu_watchdog/alerts.log
+  MODEL=FreedomIntelligence/HuatuoGPT-3-27B
+  case "$A1_GPU" in
+    *H200*) A1_W=320; SERVE_ARGS="--dp-size 4 --reasoning-parser qwen3 --mem-fraction-static 0.90 --cuda-graph-max-bs 96 --mamba-full-memory-ratio 2.0";;
+    *)      A1_W=64;  SERVE_ARGS="--dp-size 4 --reasoning-parser qwen3 --cuda-graph-max-bs 24";;
+  esac
+  CTX=81920
+  source $B0/lock.sh; skip_if_taken $A1_SLUG && return 0
+  source $B0/local_weights.sh; local_weights "$MODEL" || return 1
+  [ "$MODEL|${CTX:-65536}|${SERVE_ARGS:-}" != "${CUR:-}" ] && bash $B0/clean_gpu.sh
+  run() { bash $B0/tools/guarded.sh "${OPENROUTER_BASE_URL%/v1}/health" bash $B0/dx/run_dx_model_findingskept_img.sh FreedomIntelligence/HuatuoGPT-3-27B huatuogpt-3-27b-findingskept-img $A1_W; }
+fi

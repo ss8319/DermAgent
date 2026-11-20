@@ -1,0 +1,40 @@
+# 04 A1 judge: Qwen3.6-27B, DX_JUDGE_PASSES=3, same settings as the ablation arms (40_abl_judge_all: dp4, qwen3 parser, mem 0.90,
+# mamba 2.0, CTX 32768; H200 cuda-graph 128 / 64 workers per task; 80 GB A100/H100 cuda-graph 40 / 32 workers per task).
+# Judges only arms whose inference is DONE (DX_MODEL_DONE); waits up to 3 h for an unfinished arm only while a live job is writing it.
+source /fs04/scratch2/ub62/ssim0070/benchmark_runs/agents/a1_reqs/_a1_common.sh
+A1_SLUGS="qwen3.5-9b-findingskept-img huatuogpt-3-27b-findingskept-img glm-4.6v-findingskept-img"
+a1_all_judged() { local s; for s in $A1_SLUGS; do grep -qs "^JUDGE_DONE $s " $B0/holders/*/out/runs.log || return 1; done; }
+if a1_all_judged; then a1_done_guard "."; else
+MODEL=Qwen/Qwen3.6-27B
+case "$A1_GPU" in *H200*) A1_G=128; A1_W=64;; *) A1_G=40; A1_W=32;; esac
+SERVE_ARGS="--dp-size 4 --reasoning-parser qwen3 --mem-fraction-static 0.90 --cuda-graph-max-bs $A1_G --mamba-full-memory-ratio 2.0"
+CTX=32768
+source $B0/local_weights.sh; local_weights "$MODEL" || return 1
+[ "$MODEL|${CTX:-65536}|${SERVE_ARGS:-}" != "${CUR:-}" ] && bash $B0/clean_gpu.sh
+run() {
+  # 11-17: wait (up to 3 h) only for an arm that another LIVE job is still writing (the A40 Qwen3.5-9B run). An arm that failed on
+  # this holder is not coming: leave it to the next holder at once instead of holding 4 idle GPUs for 3 h. A judge pass that leaves
+  # an arm unjudged is repeated once.
+  local s t0=$(date +%s) todo live pend noinf o st pass=0
+  while :; do
+    todo=""; live=""; pend=""; noinf=""; pass=$((pass+1))
+    for s in $A1_SLUGS; do grep -qs "^JUDGE_DONE $s " $B0/holders/*/out/runs.log && continue; todo="$todo $s"
+      if ! grep -qs "^DX_MODEL_DONE $s " $B0/holders/*/out/runs.log; then
+        noinf="$noinf $s"; o=$(cat $B0/dx/$s/.lock 2>/dev/null)
+        if [ -n "$o" ] && [[ "$o" != pid* ]] && [ "$o" != "${SLURM_JOB_ID:-}" ]; then
+          st=$(squeue -h -j "$o" -o %T 2>&1)   # empty or "Invalid job id" = that job is gone; a Slurm error counts as live (wait)
+          [ -n "$st" ] && [[ "$st" != *"Invalid job id"* ]] && live="$live $s"
+        fi
+        continue
+      fi
+      DX_JUDGE_PASSES=3 DX_JUDGE_WORKERS=$A1_W bash $B0/tools/guarded.sh "${OPENROUTER_BASE_URL%/v1}/health" bash $B0/dx/judge_dx.sh $s
+      grep -qs "^JUDGE_DONE $s " $B0/holders/*/out/runs.log || pend="$pend $s"
+    done
+    a1_all_judged && { echo "[a1] all three A1 arms judged $(date)"; return 0; }
+    if [ -z "$live" ] && { [ -z "$pend" ] || [ $pass -ge 2 ]; }; then
+      echo "[a1] left to the next holder: not inferred (no live job is writing them):${noinf:- none}; judge incomplete after $pass passes:${pend:- none} $(date)"; return 0; fi
+    [ $(( $(date +%s) - t0 )) -gt 10800 ] && { echo "[a1] still not inferred after 3 h:$todo; leaving them to the next holder $(date)"; return 0; }
+    if [ -n "$live" ]; then sleep 600; else sleep 60; fi
+  done
+}
+fi

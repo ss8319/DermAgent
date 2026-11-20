@@ -1,0 +1,59 @@
+# 05 (owner 11-17 09:40, "Take over on A100"): finish the Qwen3.5-9B arm D on this 4x80 GB holder instead of waiting for the A40.
+# Why: HuatuoGPT + GLM finished overnight here; the A40 would end Qwen ~17:00, after 04 has left, so Qwen's judge would wait for the
+# next fit job (~Wed 08:00). Here: stop the A40 run (its runner processes, then that job ends via its holder's STOP file), repair any
+# half-written last line, take the output lock, and resume the remaining cases (finished rows are kept; the run signature does not
+# include server settings). Serving: dp4 of the A40 settings (qwen3 parser, cuda-graph 64, CTX 81920, mem-fraction holder default).
+# The arm's cases are then served on two GPU types (same weights, sampling, prompt, code): report this with the results.
+# A1_TAKEOVER_DRY=1: print what would happen, change nothing (tested 11-17 from inside job 62728289).
+source /fs04/scratch2/ub62/ssim0070/benchmark_runs/agents/a1_reqs/_a1_common.sh
+A1_SLUG=qwen3.5-9b-findingskept-img; A1_O=$B0/dx/$A1_SLUG
+if a1_done_guard "^DX_MODEL_DONE $A1_SLUG "; then :; else
+a1_nosl() { env $(env | grep -o '^SLURM_[A-Za-z_]*' | sed 's/^/-u /' | tr '\n' ' ') "$@"; }   # srun into another job from inside this one
+o=$(cat $A1_O/.lock 2>/dev/null)
+st=""; [ -n "$o" ] && [[ "$o" != pid* ]] && [ "$o" != "${SLURM_JOB_ID:-}" ] && st=$(squeue -h -j "$o" -o "%T|%j" 2>/dev/null)
+echo "[a1] 05: $A1_SLUG rows $(cat $A1_O/T1.*/predictions.jsonl 2>/dev/null | wc -l)/5094, lock owner ${o:-none} (${st:-not running}) $(date)"
+if [ "${st%%|*}" = RUNNING ]; then
+  echo "$(date '+%m-%d %H:%M') A1 ${NAME:-?} ${SLURM_JOB_ID:-?}: 05 takes over Qwen3.5-9B arm D from job $o (${st#*|}) (owner 11-17)" >> $B0/logs/gpu_watchdog/alerts.log
+  if [ -n "${A1_TAKEOVER_DRY:-}" ]; then
+    echo "[a1] 05 DRY: would touch $B0/holders/${st#*|bench-}/queue/STOP and kill on job $o:"
+    a1_nosl timeout 120 srun --jobid=$o --overlap -N1 -n1 -c1 --mem=0 bash -c 'pgrep -af "run_dx_model_findingskept_im[g].sh Qwen/Qwen3.5-9B|dx_infe[r].py .*qwen3.5-9b-findingskept-im[g]" | cut -c1-150'
+  else
+    [ "${st#*|}" = bench-a40tools ] && touch $B0/holders/a40tools/queue/STOP   # that holder then exits after its 01 request returns
+    a1_nosl timeout 120 srun --jobid=$o --overlap -N1 -n1 -c1 --mem=0 bash -c \
+      'pkill -TERM -f "run_dx_model_findingskept_im[g].sh Qwen/Qwen3.5-9B"; sleep 2; pkill -TERM -f "dx_infe[r].py .*qwen3.5-9b-findingskept-im[g]"; sleep 20
+       pkill -KILL -f "dx_infe[r].py .*qwen3.5-9b-findingskept-im[g]"; pgrep -af "dx_infe[r].py .*qwen3.5-9b-findingskept-im[g]" && exit 1 || exit 0'
+    echo "[a1] 05: A40 runner stopped (rc $?) $(date)"
+    for i in $(seq 1 30); do [ "$(squeue -h -j $o -o %T 2>/dev/null)" = RUNNING ] || break; sleep 30; done
+    echo "[a1] 05: job $o state now: $(squeue -h -j $o -o %T 2>/dev/null || true) $(date)"
+  fi
+fi
+if [ -z "${A1_TAKEOVER_DRY:-}" ]; then
+  # a runner killed mid-write can leave a half line: keep it aside, never parse it
+  for f in $A1_O/T1.*/predictions.jsonl $A1_O/T1.*/predictions.jsonl.dropped.jsonl $A1_O/T1.*/ledger.jsonl; do
+    [ -s "$f" ] || continue
+    python3 - "$f" <<'PY'
+import json, sys, time
+p = sys.argv[1]; raw = open(p, 'rb').read(); lines = raw.split(b'\n'); bad = []
+keep = []
+for i, l in enumerate(lines):
+    if not l.strip(): continue
+    try: json.loads(l); keep.append(l)
+    except Exception: bad.append((i, l))
+if bad:
+    open(p + '.partial_' + time.strftime('%Y%m%dT%H%M%S'), 'wb').write(b'\n'.join(l for _, l in bad) + b'\n')
+    open(p + '.tmp', 'wb').write(b'\n'.join(keep) + b'\n'); import os; os.replace(p + '.tmp', p)
+    print(f"[a1] 05 repaired {p}: set aside {len(bad)} unreadable line(s) (lines {[i for i, _ in bad]})")
+PY
+  done
+  for d in $A1_O $B0/tx_mcqa/$A1_SLUG; do mkdir -p $d; echo "${SLURM_JOB_ID}" > $d/.lock; done   # this job is the writer now
+fi
+MODEL=Qwen/Qwen3.5-9B
+SERVE_ARGS="--dp-size 4 --reasoning-parser qwen3 --cuda-graph-max-bs 64"
+CTX=81920
+if [ -n "${A1_TAKEOVER_DRY:-}" ]; then IFS='|' read -r MODEL CTX SERVE_ARGS <<< "${CUR:-}"; run() { :; }; else
+source $B0/lock.sh; skip_if_taken $A1_SLUG && return 0
+source $B0/local_weights.sh; local_weights "$MODEL" || return 1
+[ "$MODEL|${CTX:-65536}|${SERVE_ARGS:-}" != "${CUR:-}" ] && bash $B0/clean_gpu.sh
+run() { bash $B0/tools/guarded.sh "${OPENROUTER_BASE_URL%/v1}/health" bash $B0/dx/run_dx_model_findingskept_img.sh Qwen/Qwen3.5-9B $A1_SLUG 192; }
+fi
+fi

@@ -9,10 +9,14 @@
 # =============================================================================
 
 from .GPT_Decider import GPT_Decider
-from .Janus_Decider import Janus_Decider
-from .BioMedClip_Decider import BioMedClip_Decider
+# NOTE (repro patch): the alternative-backbone deciders below are NOT vendored in
+# this repo (only GPT/Pro/MultiClass .py files exist). Their eager import here
+# crashed `from Decider import ...`. The dermatology Case-level pipeline
+# (Derm_Case_level.py) only uses GPT/Pro/MultiClass, so these are commented out.
+# from .Janus_Decider import Janus_Decider
+# from .BioMedClip_Decider import BioMedClip_Decider
 from .Pro_Decider import Pro_Decider
-from .Qwen_Decider import Qwen_Decider
-from .InternVL_Decider import InternVL_Decider
-from .Gemma_Decider import Gemma_Decider
+# from .Qwen_Decider import Qwen_Decider
+# from .InternVL_Decider import InternVL_Decider
+# from .Gemma_Decider import Gemma_Decider
 from .MultiClass_Decider import MultiClass_Decider

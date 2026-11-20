@@ -1,0 +1,21 @@
+# 01 A1 arm D: Qwen3.5-9B, image findings in the text + images. Serving = the A arm (holders/a40/queue/done/60_dx_qwen35_9b.req):
+# --reasoning-parser qwen3 --cuda-graph-max-bs 64, CTX 81920, 48 workers (A40). At the end the server is stopped so the GPU is free
+# for MedAgent-Pro tools; on the A40 tools holder the job ends here if no Flash-Next server is up yet (11-16).
+source /fs04/scratch2/ub62/ssim0070/benchmark_runs/agents/a1_reqs/_a1_common.sh
+if ! a1_done_guard "^DX_MODEL_DONE qwen3.5-9b-findingskept-img "; then
+MODEL=Qwen/Qwen3.5-9B
+SERVE_ARGS="--reasoning-parser qwen3 --cuda-graph-max-bs 64"
+CTX=81920
+source $B0/lock.sh; skip_if_taken qwen3.5-9b-findingskept-img && return 0
+source $B0/local_weights.sh; local_weights "$MODEL" || return 1
+[ "$MODEL|${CTX:-65536}|${SERVE_ARGS:-}" != "${CUR:-}" ] && bash $B0/clean_gpu.sh
+run() { local rc; bash $B0/tools/guarded.sh "${OPENROUTER_BASE_URL%/v1}/health" bash $B0/dx/run_dx_model_findingskept_img.sh Qwen/Qwen3.5-9B qwen3.5-9b-findingskept-img 48; rc=$?
+  kill $SP 2>/dev/null; bash $B0/clean_gpu.sh
+  # 11-16: on the A40 tools holder, end the job when no Flash-Next server is up, instead of idling ~15 h as a tools host until
+  # Flash-Next starts after A1 (M3 cancels idle GPU jobs). agents/a40_ondemand.sh requests a fresh A40 when a server is close.
+  if [ $rc -eq 0 ] && [ "${NAME:-}" = a40tools ] && ! ls $B0/dx/medagentpro-qwen3.8-flash-next/servers/*.url >/dev/null 2>&1; then
+    echo "$(date '+%m-%d %H:%M') A40 $SLURM_JOB_ID: A1 Qwen3.5-9B done, no Flash-Next server yet: ending this job (a40_ondemand requests a new A40 later)" >> $B0/logs/gpu_watchdog/alerts.log
+    touch $Q/STOP
+  fi
+  return $rc; }
+fi

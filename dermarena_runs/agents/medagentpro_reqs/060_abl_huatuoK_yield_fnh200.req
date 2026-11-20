@@ -1,0 +1,12 @@
+# 060 (surplus fnh200 holder, 4 GPUs) — ABLATION: HuatuoGPT-3 27B findings-kept inference. Runs only when this holder is surplus for the agents (its agent
+# request returned 3), and hands the GPU back the moment the agent work needs it (owner 11-09: agents first). agents/mp_ablation_yield.sh
+MODEL=FreedomIntelligence/HuatuoGPT-3-27B
+SERVE_ARGS="--dp-size 4 --reasoning-parser qwen3 --mem-fraction-static 0.90 --cuda-graph-max-bs 40 --mamba-full-memory-ratio 2.0"
+CTX=81920
+source /fs04/scratch2/ub62/ssim0070/benchmark_runs/local_weights.sh; local_weights "$MODEL" || return 1
+[ "$MODEL|${CTX:-65536}|${SERVE_ARGS:-}" != "${CUR:-}" ] && bash /fs04/scratch2/ub62/ssim0070/benchmark_runs/clean_gpu.sh
+run() {
+  local B=/fs04/scratch2/ub62/ssim0070/benchmark_runs
+  Q=$Q REQ_SELF=$B/agents/medagentpro_reqs/060_abl_huatuoK_yield_fnh200.req bash $B/agents/mp_ablation_yield.sh $B/dx/medagentpro-qwen3.8-flash-next/locks/fn_all $B/agents/medagentpro_reqs/010_medagentpro_fn_full_standby.req $B/dx/huatuogpt-3-27b-findingskept/yield_lock -- \
+    bash $B/tools/guarded.sh "${OPENROUTER_BASE_URL%/v1}/health" bash $B/dx/run_dx_model_findingskept.sh FreedomIntelligence/HuatuoGPT-3-27B huatuogpt-3-27b-findingskept 160
+}

@@ -1,0 +1,9 @@
+# A100 x2 (gpu2a100/gpu2a100b) variant, 11-10: runs after the Qwen MedAgent-Pro work on this holder; dp2, 80 workers.
+# 60 — HuatuoGPT-3 27B findings-kept arm (claims 1/3a) (owner 2026-11-08: if GLM finishes, use a100x4b for HuatuoGPT-3 27B too). 4x A100-80G -> 4 replicas (dp4); lock-guarded so abl_a100 (62159171) skips it if this runs first.
+MODEL=FreedomIntelligence/HuatuoGPT-3-27B
+SERVE_ARGS="--dp-size 2 --reasoning-parser qwen3 --mem-fraction-static 0.90 --cuda-graph-max-bs 40 --mamba-full-memory-ratio 2.0"
+CTX=81920
+source /fs04/scratch2/ub62/ssim0070/benchmark_runs/lock.sh; skip_if_taken huatuogpt-3-27b-findingskept && return 0
+source /fs04/scratch2/ub62/ssim0070/benchmark_runs/local_weights.sh; local_weights "$MODEL" || return 1
+[ "$MODEL|${CTX:-65536}|${SERVE_ARGS:-}" != "${CUR:-}" ] && bash /fs04/scratch2/ub62/ssim0070/benchmark_runs/clean_gpu.sh
+run() { bash /fs04/scratch2/ub62/ssim0070/benchmark_runs/tools/guarded.sh "${OPENROUTER_BASE_URL%/v1}/health" bash /fs04/scratch2/ub62/ssim0070/benchmark_runs/dx/run_dx_model_findingskept.sh FreedomIntelligence/HuatuoGPT-3-27B huatuogpt-3-27b-findingskept 80; }

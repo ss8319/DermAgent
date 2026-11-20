@@ -13,6 +13,7 @@ import os
 import json
 import re
 from openai import OpenAI
+from mp_llm import mp_create  # DermArena v1: env-configurable backbone + full trace
 
 class Planner:
     def __init__(self, api_key):
@@ -134,7 +135,7 @@ class Planner:
                 pass
         return ids if ids else None
 
-    def _validate_and_clean(self, data, toolset=None):
+    def _validate_and_clean(self, data, toolset=None, check_bundling=True):
         required = ["id", "tool", "action_type", "action", "input_type", "output_type", "output_path"]
         if not isinstance(data, list):
             raise ValueError("Planner output is not a JSON array.")
@@ -213,7 +214,8 @@ class Planner:
             output_path = "" if item["output_path"] is None else str(item["output_path"])
 
             # qualitative: avoid bundling multiple indicators in one step
-            if at == "qualitative":
+            # DermArena v1: check_bundling=False only after the normal tries (owner 2026-11-07, every candidate ends with a plan).
+            if at == "qualitative" and check_bundling:
                 lowered = action.lower()
                 if any(sep in lowered for sep in [",", " and ", " / "]):
                     raise ValueError(
@@ -316,15 +318,15 @@ class Planner:
         return cleaned
 
     def plan(self, output_path, prompt, rag_text, filename="plan.json",
-             model="chatgpt-4o-latest", toolset=None):
+             model="gpt-4o", toolset=None, check_bundling=True):
         os.makedirs(output_path, exist_ok=True)
         messages = self._build_messages(rag_text, prompt, toolset)
 
-        completion = self.client.chat.completions.create(model=model, messages=messages)
+        completion = mp_create(self.client, messages, model_default=model, module="planner")
         raw = completion.choices[0].message.content
 
         data = self._safe_json_parse(raw)
-        plan = self._validate_and_clean(data, toolset=toolset)
+        plan = self._validate_and_clean(data, toolset=toolset, check_bundling=check_bundling)
 
         out_file = os.path.join(output_path, filename)
         with open(out_file, "w", encoding="utf-8") as f:

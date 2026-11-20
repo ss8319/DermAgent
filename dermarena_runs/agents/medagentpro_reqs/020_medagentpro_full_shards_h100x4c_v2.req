@@ -1,0 +1,34 @@
+# 020 v2 (h100x4c, 11-09 17:45) — Qwen FULL: up to two of the lagging shards 0 / 1, one per H100 server pair (holder's server on GPUs 0-1;
+# a second identical server on GPUs 2-3, port+1, only if a second shard is free), 64 threads each, tools on L40S GPU 2 (shard 0) / 3 (shard 1).
+# mp_take_shard.sh first stops the runner serving that shard now, by exact process group. Replaces 020_medagentpro_full_s01_h100x4c_2srv.req.
+MODEL=Qwen/Qwen3.5-27B
+SERVE_ARGS="--tp-size 2 --reasoning-parser qwen3 --tool-call-parser qwen3_coder --mem-fraction-static 0.90 --cuda-graph-max-bs 64 --mamba-full-memory-ratio 2.0"
+CTX=131072
+source /fs04/scratch2/ub62/ssim0070/benchmark_runs/local_weights.sh; local_weights "$MODEL" || return 1
+[ "$MODEL|${CTX:-65536}|${SERVE_ARGS:-}" != "${CUR:-}" ] && bash /fs04/scratch2/ub62/ssim0070/benchmark_runs/clean_gpu.sh
+run() {
+  local B=/fs04/scratch2/ub62/ssim0070/benchmark_runs D=/fs04/scratch2/ub62/ssim0070/benchmark_runs/dx/medagentpro-qwen3.5-27b got=""
+  for x in 0 1; do NOWAIT=1 bash $B/agents/mp_shard_lock.sh $D/locks/shard$x $SLURM_JOB_ID && got="$got $x"; done
+  [ -z "$got" ] && { echo "surplus: shard0 and shard1 owned by running jobs"; return 3; }
+  trap "for x in $got; do [ \"\$(cat $D/locks/shard\$x/owner 2>/dev/null)\" = \"$SLURM_JOB_ID\" ] && rm -rf $D/locks/shard\$x; done" EXIT
+  local H=$(hostname) P2=$((PORT + 1)) s1 s2 SP2=""
+  set -- $got; s1=$1; s2=${2:-}
+  if [ -n "$s2" ]; then
+    CUDA_VISIBLE_DEVICES=2,3 apptainer exec --nv --home "${CONTAINER_HOME}:${CONTAINER_HOME}" --bind "${REPO}:${REPO}" \
+      --env "HF_HOME=${HF_HOME}" --env "HUGGINGFACE_HUB_CACHE=${HUGGINGFACE_HUB_CACHE}" \
+      --env "TRANSFORMERS_CACHE=${TRANSFORMERS_CACHE}" --env "HF_HUB_OFFLINE=1" --env "TRANSFORMERS_OFFLINE=1" \
+      --env "FLASHINFER_WORKSPACE_DIR=${CONTAINER_HOME}/.cache/flashinfer" \
+      --env "TRITON_CACHE_DIR=${CONTAINER_HOME}/.triton" --env "TORCH_HOME=${CONTAINER_HOME}/.cache/torch" \
+      "${SGLANG_CONTAINER}" python3 -m sglang.launch_server --model-path "$MODEL" --host 0.0.0.0 --port $P2 \
+        --context-length "$CTX" --mem-fraction-static 0.85 --trust-remote-code $SERVE_ARGS >> $OUT/server2_${SLURM_JOB_ID}.log 2>&1 &
+    SP2=$!
+    for i in $(seq 1 240); do curl -sf http://127.0.0.1:$P2/health >/dev/null && break; kill -0 $SP2 2>/dev/null || break; sleep 10; done
+    if curl -sf http://127.0.0.1:$P2/health >/dev/null; then echo "second server ready on $H:$P2 $(date)"
+    else echo "second server failed: shard $s2 stays where it is"; kill $SP2 2>/dev/null; SP2=""; rm -rf $D/locks/shard$s2; s2=""; fi
+  fi
+  bash $B/agents/mp_take_shard.sh $s1 "http://$H:$PORT/v1" $((2 + s1)) 64 & local g1=$! g2=""
+  [ -n "$s2" ] && { sleep 20; bash $B/agents/mp_take_shard.sh $s2 "http://$H:$P2/v1" $((2 + s2)) 64 & g2=$!; }
+  local rc=0; wait $g1 || rc=$?; [ -n "$g2" ] && { wait $g2 || rc=$?; }
+  [ -n "$SP2" ] && kill $SP2 2>/dev/null
+  return $rc
+}

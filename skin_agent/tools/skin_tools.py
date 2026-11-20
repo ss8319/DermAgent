@@ -1590,7 +1590,12 @@ class RAGTool(BaseSkinTool):
         if self.preprocess is not None:
             del self.preprocess
             self.preprocess = None
-        # Note: We don't close the Qdrant client as it's lightweight
+        # Close the Qdrant client to release the path-mode directory lock —
+        # otherwise an LRU reload of TextRAGTool (or another RAGTool) on the
+        # same QDRANT_PATH crashes on the second open.
+        if self.client is not None:
+            self.client.close()
+            self.client = None
         self._derm1m_open_clip = None
         self._load_failed = False
         # Don't unload vqa_tool as it's a reference, not owned by us
@@ -1694,9 +1699,20 @@ class TextRAGTool(BaseSkinTool):
             from qdrant_client import QdrantClient
             from transformers import AutoModel, AutoTokenizer, AutoModelForCausalLM
 
-            # Connect to Qdrant server
-            print(f"[TextRAGTool] Connecting to Qdrant at {self.qdrant_host}:{self.qdrant_port}...")
-            self.client = QdrantClient(host=self.qdrant_host, port=self.qdrant_port, timeout=120)
+            # Connect to Qdrant. Embedded on-disk mode is opt-in via
+            # QDRANT_TEXT_PATH (preferred for TextRAGTool, distinct from
+            # RAGTool's QDRANT_PATH) or QDRANT_PATH as fallback. Distinct paths
+            # are required when both rag and text_rag are enabled, because
+            # qdrant-client takes an exclusive directory lock in path mode.
+            # If neither env var is set, fall back to the localhost server.
+            import os as _os
+            _qpath = _os.environ.get("QDRANT_TEXT_PATH") or _os.environ.get("QDRANT_PATH")
+            if _qpath:
+                print(f"[TextRAGTool] Using embedded Qdrant at {_qpath} ...")
+                self.client = QdrantClient(path=_qpath)
+            else:
+                print(f"[TextRAGTool] Connecting to Qdrant at {self.qdrant_host}:{self.qdrant_port}...")
+                self.client = QdrantClient(host=self.qdrant_host, port=self.qdrant_port, timeout=120)
 
             # Verify collection exists
             collections = self.client.get_collections().collections
@@ -2242,7 +2258,12 @@ class TextRAGTool(BaseSkinTool):
         self._token_false_id = None
         self._load_failed = False
         self._reranker_failed = False
-        # Note: We don't close the Qdrant client as it's lightweight
+        # Close the Qdrant client to release the path-mode directory lock —
+        # otherwise an LRU reload of RAGTool (or another TextRAGTool) on the
+        # same QDRANT_PATH crashes on the second open.
+        if self.client is not None:
+            self.client.close()
+            self.client = None
         super().unload()
         print("[TextRAGTool] Model unloaded.")
 

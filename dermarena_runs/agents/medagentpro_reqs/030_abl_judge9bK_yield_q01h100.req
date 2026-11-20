@@ -1,0 +1,12 @@
+# 030 (surplus q01h100 holder, 4 GPUs) — ABLATION: judge Qwen3.5-9B findings-kept arm (Qwen3.6-27B judge). Runs only when this holder is surplus for the agents (its agent
+# request returned 3), and hands the GPU back the moment the agent work needs it (owner 11-09: agents first). agents/mp_ablation_yield.sh
+MODEL=Qwen/Qwen3.6-27B
+SERVE_ARGS="--dp-size 4 --reasoning-parser qwen3 --mem-fraction-static 0.90 --cuda-graph-max-bs 160 --mamba-full-memory-ratio 2.0"
+CTX=32768
+source /fs04/scratch2/ub62/ssim0070/benchmark_runs/local_weights.sh; local_weights "$MODEL" || return 1
+[ "$MODEL|${CTX:-65536}|${SERVE_ARGS:-}" != "${CUR:-}" ] && bash /fs04/scratch2/ub62/ssim0070/benchmark_runs/clean_gpu.sh
+run() {
+  local B=/fs04/scratch2/ub62/ssim0070/benchmark_runs
+  Q=$Q REQ_SELF=$B/agents/medagentpro_reqs/030_abl_judge9bK_yield_q01h100.req bash $B/agents/mp_ablation_yield.sh $B/dx/medagentpro-qwen3.5-27b/locks/shard0:$B/dx/medagentpro-qwen3.5-27b/locks/shard1 $B/agents/medagentpro_reqs/020_medagentpro_full_shards_h100x4c_v2.req $B/dx/qwen3.5-9b-findingskept/yield_judge_lock -- \
+    env DX_JUDGE_PASSES=3 DX_JUDGE_WORKERS=64 bash $B/tools/guarded.sh "${OPENROUTER_BASE_URL%/v1}/health" bash $B/dx/judge_dx.sh qwen3.5-9b-findingskept
+}

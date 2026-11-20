@@ -1,0 +1,19 @@
+# 080 — MedAgent-Pro x Qwen3.5-27B fresh canary on ALL 11-08 fixes (memory parser, PanDerm as a measurement, #4 report-only), launcher v2.
+# canary20 T1.1 + T1.2 -> canary_iclr3, then plan sample + rank stability, then the integrity check that 090 (H100) and gpu2a100 wait for.
+MODEL=Qwen/Qwen3.5-27B
+SERVE_ARGS="--tp-size 2 --reasoning-parser qwen3 --tool-call-parser qwen3_coder --mem-fraction-static 0.90 --cuda-graph-max-bs 64 --mamba-full-memory-ratio 2.0"
+CTX=131072
+source /fs04/scratch2/ub62/ssim0070/benchmark_runs/local_weights.sh; local_weights "$MODEL" || return 1
+[ "$MODEL|${CTX:-65536}|${SERVE_ARGS:-}" != "${CUR:-}" ] && bash /fs04/scratch2/ub62/ssim0070/benchmark_runs/clean_gpu.sh
+run() {
+  local B=/fs04/scratch2/ub62/ssim0070/benchmark_runs S=medagentpro-qwen3.5-27b A=/fs04/scratch2/ub62/ssim0070/benchmark_runs/agents/run_medagentpro_v2.sh
+  local D=$B/dx/$S
+  MP_SLUG=$S MP_BACKBONE=Qwen/Qwen3.5-27B MP_TOOL_GPUS="2 3" MP_NPROC=2 MP_CANARY_DIR=canary_iclr3 MP_CANARY_THREADS=24 MP_ALLOC_CONF=expandable_segments:True \
+    MP_SERVER_ARGS="$SERVE_ARGS --context-length $CTX" bash $B/tools/guarded.sh "${OPENROUTER_BASE_URL%/v1}/health" bash $A canary
+  local rc=$?
+  bash $B/agents/mp_canary_integrity.sh $D/canary_iclr3; local ic=$?
+  MP_SLUG=$S MP_N_PLANS=10 bash $A plans > $D/canary_iclr3/PLANS_SAMPLE.txt 2>&1
+  MP_SLUG=$S MP_CANARY_DIR=canary_iclr3 MP_BACKBONE=Qwen/Qwen3.5-27B bash $B/tools/guarded.sh "${OPENROUTER_BASE_URL%/v1}/health" bash $A rank-stability
+  grep -h "cases/min\|CALL BUDGET\|DROPPED\|TOOL ERROR\|PLAN NOT CACHED" $D/logs/canary_p*.log | tail -8
+  return $ic
+}
