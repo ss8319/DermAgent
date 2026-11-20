@@ -139,9 +139,11 @@ def rgb_path(fp: Path) -> str:
         with _conv_lock:
             if not out.exists():
                 CONV_DIR.mkdir(parents=True, exist_ok=True)
-                tmp = out.with_suffix(".tmp.png")
+                # per-process temp name + atomic replace: the cache dir is shared by every runner on the node, and
+                # _conv_lock only covers this process (a shared temp name let two writers leave a torn PNG behind)
+                tmp = out.with_name(f"{out.stem}.{os.getpid()}.{threading.get_ident()}.tmp.png")
                 I.convert("RGB").save(tmp, format="PNG")
-                tmp.rename(out)
+                os.replace(tmp, out)
         return str(out)
 
 
@@ -211,12 +213,90 @@ def merge(out_dir: Path):
                 rows.setdefault(r["_id"], r)
             except Exception:  # noqa: BLE001
                 pass
-    tmp = out_dir / "predictions.jsonl.tmp"
+    # per-process temp name: several shard runners may merge the same folder at once (a shared name lets two writers
+    # interleave into one file and then race on the rename)
+    tmp = out_dir / f"predictions.jsonl.tmp{os.getpid()}.{threading.get_ident()}"
     with tmp.open("w") as fo:
         for r in rows.values():
             fo.write(json.dumps(r, ensure_ascii=False) + "\n")
-    tmp.rename(out_dir / "predictions.jsonl")
+    os.replace(tmp, out_dir / "predictions.jsonl")
     print(f"[merge] {out_dir}: {len(rows)} rows -> predictions.jsonl")
+    # Report only (PR #4 review): rows of more than one run_sig in the merged file. Mixed folders exist on purpose (see
+    # META_OVERRIDES / SEEDED_FROM_CANARY next to them), so this never changes which rows are kept.
+    sigs = {}
+    for r in rows.values():
+        sigs[r.get("run_sig")] = sigs.get(r.get("run_sig"), 0) + 1
+    if len(sigs) > 1:
+        print(f"[merge] {out_dir}: MIXED run_sig {sigs} (check META_OVERRIDES / SEEDED_FROM_CANARY)", flush=True)
+
+
+def open_jobs(jd: Path, k: int):
+    """Job files shard k still has to handle, in name order. Shards k > 0: no <stem>.p<k>.done / .p<k>.incomplete yet.
+    Shard 0 also owns the merge and the end marker, so it keeps a job until <stem>.ALLDONE or <stem>.ENDED_INCOMPLETE
+    exists (PR #4 fix review R1: a STOP during shard 0's wait used to leave a job with .p0.done, a partial merge and no
+    end marker that no restart ever finished). Re-entering a finished shard-0 share is cheap: its todo is empty."""
+    out = []
+    for j in sorted(jd.glob("*.json")):
+        if k == 0:
+            closed = (jd / f"{j.stem}.ALLDONE").exists() or (jd / f"{j.stem}.ENDED_INCOMPLETE").exists()
+        else:
+            closed = (jd / f"{j.stem}.p{k}.done").exists() or (jd / f"{j.stem}.p{k}.incomplete").exists()
+        if not closed:
+            out.append(j)
+    return out
+
+
+def shard_left(plan):
+    """{task: [planned _id still without a row]} for one service job. Reads each output folder once (PR #4 review F2:
+    a done_ids() call per case took ~1 s each on large folders)."""
+    left = {}
+    for task, out_dir, todo in plan:
+        have = done_ids(out_dir)
+        left[task] = [r["_id"] for r in todo if r["_id"] not in have]
+    return left
+
+
+def finish_job(jd: Path, stem: str, k: int, n: int, plan, left, run_sig, merge_and_check, stop=None, poll=20, tag="[v1]"):
+    """End of one service job for shard k of n. Shared by the DermAgent and MedAgent-Pro runners.
+    - every planned case has a row -> <stem>.p<k>.done; otherwise <stem>.p<k>.incomplete (the missing ids inside);
+      with STOP set and cases left, nothing is written and the job stays open for the next start (returns False).
+    - shard 0 waits until every shard has a marker, then ALWAYS merges + postchecks (PR #4 review F4: also when shard 0
+      itself is incomplete) and writes exactly one end marker: <stem>.ALLDONE if every shard is .done, else
+      <stem>.ENDED_INCOMPLETE (PR #4 review F3: waiters need a terminal marker; scripts/wait_job_end.sh accepts both).
+      If STOP interrupts that wait, no end marker is written and shard 0 finishes the job on its next start (open_jobs).
+    merge_and_check(plan) does the merge + postcheck; stop() -> bool; returns True when the job is closed for this shard."""
+    stop = stop or (lambda: (jd / "STOP").exists())
+    n_left = sum(len(v) for v in left.values())
+    if n_left and stop():
+        return False
+    if n_left:
+        (jd / f"{stem}.p{k}.done").unlink(missing_ok=True)
+        (jd / f"{stem}.p{k}.incomplete").write_text(json.dumps({"time": now(), "run_sig": run_sig, "missing": left}))
+        print(f"{tag} SERVICE job {stem} shard {k}: {n_left} case(s) without a row -> {stem}.p{k}.incomplete, not .done "
+              f"(to retry: delete {stem}.p{k}.incomplete and {stem}.ENDED_INCOMPLETE; shard 0 then re-merges)", flush=True)
+    else:
+        (jd / f"{stem}.p{k}.incomplete").unlink(missing_ok=True)
+        (jd / f"{stem}.p{k}.done").write_text(now())
+    if k != 0:
+        return True
+    state = lambda x: ("done" if (jd / f"{stem}.p{x}.done").exists() else  # noqa: E731
+                       "incomplete" if (jd / f"{stem}.p{x}.incomplete").exists() else "open")
+    while any(state(x) == "open" for x in range(n)) and not stop():
+        time.sleep(poll)
+    merge_and_check(plan)
+    shards = {x: state(x) for x in range(n)}
+    if all(v == "done" for v in shards.values()):
+        (jd / f"{stem}.ENDED_INCOMPLETE").unlink(missing_ok=True)   # exactly one end marker (fix review R2)
+        (jd / f"{stem}.ALLDONE").write_text(now())
+        print(f"{tag} SERVICE job {stem} ALLDONE", flush=True)
+    elif any(v == "open" for v in shards.values()):
+        print(f"{tag} SERVICE job {stem}: STOP while shards are still open {shards} — no end marker", flush=True)
+    else:
+        (jd / f"{stem}.ALLDONE").unlink(missing_ok=True)
+        (jd / f"{stem}.ENDED_INCOMPLETE").write_text(json.dumps({"time": now(), "shards": shards}))
+        print(f"{tag} SERVICE job {stem} ENDED_INCOMPLETE {shards} (merged + postchecked; see the .incomplete markers)",
+              flush=True)
+    return True
 
 
 # --------------------------------------------------------------------------------------------- main
@@ -371,13 +451,14 @@ def main():
 
     # ---- persistent worker (CLAUDE.md: load once, hold the allocation) ----------------------------------------
     # Job file <jobdir>/<NN_name>.json: {"tasks": "T1.1,T1.2", "input_tmpl": ..., "out_tmpl": ..., "limit": null,
-    # "threads": 12}. Every shard runs its share and writes <name>.p<k>.done; shard 0 then waits for all n,
-    # merges the shards, runs the Dx postcheck and writes <name>.ALLDONE. STOP in the jobdir ends the worker.
+    # "threads": 12}. Every shard runs its share and writes <name>.p<k>.done (or .p<k>.incomplete with the missing ids);
+    # shard 0 then waits for all n, merges, runs the Dx postcheck and writes ONE end marker: <name>.ALLDONE (all shards
+    # done) or <name>.ENDED_INCOMPLETE (finish_job). Waiters: scripts/wait_job_end.sh. STOP in the jobdir ends the worker.
     jd = Path(a.service)
     jd.mkdir(parents=True, exist_ok=True)
     print(f"[v1] SERVICE ready (shard {k}/{n}) — polling {jd}", flush=True)
     while not (jd / "STOP").exists():
-        jobs = [j for j in sorted(jd.glob("*.json")) if not (jd / f"{j.stem}.p{k}.done").exists()]
+        jobs = open_jobs(jd, k)
         if not jobs:
             time.sleep(30)
             continue
@@ -399,10 +480,9 @@ def main():
         for task, out_dir, todo in plan:
             if todo and not (jd / "STOP").exists():
                 run_task(task, out_dir, todo, k, n, thr, runner, dx_infer, run_sig, base_meta["max_tokens_per_call"], a.backbone)
-        (jd / f"{jf.stem}.p{k}.done").write_text(now())
-        if k == 0:  # merge + postcheck once every shard has finished this job
-            while not all((jd / f"{jf.stem}.p{x}.done").exists() for x in range(n)) and not (jd / "STOP").exists():
-                time.sleep(20)
+        # .done / .incomplete / ALLDONE / ENDED_INCOMPLETE: finish_job() (a stop file or a case still dropped after pass 2
+        # must not mark the job finished; a restarted worker would never pick it up again)
+        def merge_and_check(plan):
             for task, out_dir, _ in plan:
                 merge(out_dir)
                 inp = job.get("input_tmpl", str(RELEASE / "tasks/{task_dir}/test.jsonl")).format(
@@ -411,8 +491,7 @@ def main():
                                    capture_output=True, text=True)
                 (out_dir / "POSTCHECK.txt").write_text(r.stdout + r.stderr)
                 print(f"[v1] SERVICE postcheck {jf.stem} {task}:\n{r.stdout[-1500:]}", flush=True)
-            (jd / f"{jf.stem}.ALLDONE").write_text(now())
-            print(f"[v1] SERVICE job {jf.stem} ALLDONE", flush=True)
+        finish_job(jd, jf.stem, k, n, plan, shard_left(plan), run_sig, merge_and_check, tag="[v1]")
     print("[v1] SERVICE STOP seen — exiting", flush=True)
 
 

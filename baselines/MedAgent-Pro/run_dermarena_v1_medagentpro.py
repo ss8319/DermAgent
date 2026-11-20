@@ -73,7 +73,8 @@ API_KEY = os.environ.get("OPENAI_API_KEY") or "local"
 
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(AG / "scripts"))
-import run_dermarena_v1 as v1  # noqa: E402  (read-only reuse: rgb_path, done_ids, merge, lock_tool_classes, now, sha_file)
+import run_dermarena_v1 as v1  # noqa: E402  (read-only reuse: rgb_path, done_ids, merge, open_jobs, shard_left, finish_job,
+#   lock_tool_classes, now, sha_file)
 from medlineplus_kb import CHUNK_PROFILES, chunk_profile_name, normalise_name, sha_path  # noqa: E402
 
 DC, RELEASE, TASK_DIR, DERM_MODALITIES = v1.DC, v1.RELEASE, v1.TASK_DIR, v1.DERM_MODALITIES
@@ -1779,13 +1780,14 @@ def main():
         return
 
     # persistent worker (= run_dermarena_v1 --service): job files <jobdir>/*.json
-    # {"tasks", "input_tmpl", "out_tmpl", "limit", "threads"}; <job>.p<k>.done; shard 0 merges + postchecks ->
-    # <job>.ALLDONE; <jobdir>/STOP ends the workers.
+    # {"tasks", "input_tmpl", "out_tmpl", "limit", "threads"}; <job>.p<k>.done or .p<k>.incomplete; shard 0 merges +
+    # postchecks -> ONE end marker <job>.ALLDONE or <job>.ENDED_INCOMPLETE (v1.finish_job / v1.open_jobs; waiters:
+    # scripts/wait_job_end.sh); <jobdir>/STOP ends the workers.
     jd = Path(a.service)
     jd.mkdir(parents=True, exist_ok=True)
     print(f"[mp] SERVICE ready (shard {k}/{n}) — polling {jd}", flush=True)
     while not (jd / "STOP").exists():
-        jobs = [j for j in sorted(jd.glob("*.json")) if not (jd / f"{j.stem}.p{k}.done").exists()]
+        jobs = v1.open_jobs(jd, k)
         if not jobs:
             time.sleep(30)
             continue
@@ -1803,18 +1805,16 @@ def main():
         for task, out_dir, todo in work:
             if todo and not (jd / "STOP").exists():
                 run_task(ctx, task, out_dir, todo, k, thr)
-        (jd / f"{jf.stem}.p{k}.done").write_text(v1.now())
-        if k == 0:
-            while not all((jd / f"{jf.stem}.p{x}.done").exists() for x in range(n)) and not (jd / "STOP").exists():
-                time.sleep(20)
-            for task, out_dir, _ in work:
+        # .done / .incomplete / ALLDONE / ENDED_INCOMPLETE: v1.finish_job() (shared with the DermAgent runner)
+        def merge_and_check(plan):
+            for task, out_dir, _ in plan:
                 v1.merge(out_dir)
                 r = subprocess.run(["python3", str(DC / "dx_benchmark/dx_check.py"), "post", str(out_dir), task,
                                     itmpl.format(task=task, task_dir=TASK_DIR[task])], capture_output=True, text=True)
                 r2 = subprocess.run([sys.executable, str(HERE / "mp_postcheck.py"), str(out_dir), task], capture_output=True, text=True)
                 (out_dir / "POSTCHECK.txt").write_text(r.stdout + r.stderr + r2.stdout + r2.stderr)
                 print(f"[mp] SERVICE postcheck {jf.stem} {task}:\n{r.stdout[-1500:]}", flush=True)
-            (jd / f"{jf.stem}.ALLDONE").write_text(v1.now())
+        v1.finish_job(jd, jf.stem, k, n, work, v1.shard_left(work), run_sig, merge_and_check, tag="[mp]")
     print("[mp] SERVICE STOP seen — exiting", flush=True)
 
 
