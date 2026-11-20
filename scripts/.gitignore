@@ -17,5 +17,11 @@
 !build_qdrant_db.py
 !build_qdrant_rag.py
 
+# DermArena v1 reproduction runner, its offline tests and the bounded service-job waiter
+!run_dermarena_agent.py
+!run_dermarena_v1.py
+!test_run_dermarena_v1_helpers.py
+!wait_job_end.sh
+
 # Keep this .gitignore
 !.gitignore
